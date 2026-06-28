@@ -1,0 +1,127 @@
+/**
+ * Aeon Demo — Staging Deployment Pipeline
+ *
+ * A pipeline that SUCCEEDS — deploys the platform-services image to a
+ * staging Kubernetes cluster. Provides a passing baseline alongside the
+ * failing jobs so the dashboard shows a realistic success/failure mix.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source":        "jenkins",
+            "name":          "${env.JOB_NAME}",
+            "status":        "${status}",
+            "repo":          "acme/platform-services",
+            "branch":        "${env.GIT_BRANCH ?: 'main'}",
+            "build_number":  ${env.BUILD_NUMBER},
+            "url":           "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}",
+            "logs":          "${safeLogs}",
+            "commit_sha":    "${env.GIT_COMMIT ?: ''}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON', requestBody: payload,
+                        timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) {
+            echo "Aeon notification failed (non-critical): ${e.message}"
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 20, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    parameters {
+        string(name: 'IMAGE_TAG',     defaultValue: 'latest', description: 'Docker image tag to deploy')
+        string(name: 'REPLICA_COUNT', defaultValue: '2',      description: 'Number of pod replicas')
+        booleanParam(name: 'RUN_SMOKE_TESTS', defaultValue: true, description: 'Run smoke tests after deploy')
+    }
+
+    environment {
+        CLUSTER    = 'staging-us-east-1'
+        NAMESPACE  = 'platform'
+        SERVICE    = 'platform-services'
+        REGISTRY   = 'registry.acme.internal'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Branch: main  Commit: d4e8f21"
+            }
+        }
+
+        stage('Validate Manifests') {
+            steps {
+                echo "Running kubeval on k8s/staging/*.yaml..."
+                echo "k8s/staging/deployment.yaml - OK"
+                echo "k8s/staging/service.yaml - OK"
+                echo "k8s/staging/ingress.yaml - OK"
+                echo "k8s/staging/hpa.yaml - OK"
+                echo "All manifests valid"
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo "kubectl config use-context ${CLUSTER}"
+                echo "kubectl set image deployment/${SERVICE} ${SERVICE}=${REGISTRY}/${SERVICE}:${params.IMAGE_TAG} -n ${NAMESPACE}"
+                echo "deployment.apps/${SERVICE} image updated"
+                echo ""
+                echo "kubectl rollout status deployment/${SERVICE} -n ${NAMESPACE} --timeout=5m"
+                echo "Waiting for deployment '${SERVICE}' rollout to finish: 0 of ${params.REPLICA_COUNT} updated replicas are available..."
+                echo "Waiting for deployment '${SERVICE}' rollout to finish: 1 of ${params.REPLICA_COUNT} updated replicas are available..."
+                echo "deployment '${SERVICE}' successfully rolled out"
+            }
+        }
+
+        stage('Smoke Tests') {
+            when { expression { params.RUN_SMOKE_TESTS } }
+            steps {
+                echo "Running smoke tests against https://staging.acme.internal..."
+                echo "GET /health         → 200 OK  (12ms)"
+                echo "GET /api/v1/status  → 200 OK  (34ms)"
+                echo "POST /api/v1/ingest → 202 Accepted  (89ms)"
+                echo "GET /metrics        → 200 OK  (8ms)"
+                echo ""
+                echo "All 4 smoke tests passed"
+            }
+        }
+
+        stage('Notify Stakeholders') {
+            steps {
+                echo "Deployment summary:"
+                echo "  Service:    ${SERVICE}"
+                echo "  Tag:        ${params.IMAGE_TAG}"
+                echo "  Cluster:    ${CLUSTER}"
+                echo "  Namespace:  ${NAMESPACE}"
+                echo "  Replicas:   ${params.REPLICA_COUNT}"
+                echo "  Status:     SUCCESS"
+            }
+        }
+    }
+
+    post {
+        success {
+            aeon_notify('success')
+            echo "Deployment to staging complete"
+        }
+        failure {
+            aeon_notify('failure', 'Staging deployment failed — see build log', '')
+        }
+        aborted {
+            aeon_notify('aborted')
+        }
+    }
+}

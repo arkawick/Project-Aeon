@@ -1,0 +1,128 @@
+/**
+ * Aeon Demo — Docker Image Build Pipeline
+ *
+ * Simulates a Docker build that fails because the CI runner ran out of
+ * disk space (Docker layer cache bloat). Notifies Aeon on every run.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source":        "jenkins",
+            "name":          "${env.JOB_NAME}",
+            "status":        "${status}",
+            "repo":          "acme/platform-services",
+            "branch":        "${env.GIT_BRANCH ?: 'main'}",
+            "build_number":  ${env.BUILD_NUMBER},
+            "url":           "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}",
+            "logs":          "${safeLogs}",
+            "commit_sha":    "${env.GIT_COMMIT ?: ''}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON', requestBody: payload,
+                        timeout: 10, validResponseCodes: '100:299')
+            echo "Aeon notified: ${status}"
+        } catch (Exception e) {
+            echo "Aeon notification failed (non-critical): ${e.message}"
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        IMAGE_NAME = 'acme/platform-services'
+        IMAGE_TAG  = "${env.BUILD_NUMBER ?: 'latest'}"
+        REGISTRY   = 'registry.acme.internal'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Branch: main  Commit: d4e8f21"
+                echo "Fetching tags for versioning..."
+            }
+        }
+
+        stage('Validate Dockerfile') {
+            steps {
+                echo "Running hadolint on Dockerfile..."
+                echo "DL3008 warning: Pin versions in apt get install"
+                echo "DL3009 info: Delete the apt-get lists after installing something"
+                echo "Hadolint passed with 0 errors, 2 warnings"
+            }
+        }
+
+        stage('Build Image') {
+            steps {
+                script {
+                    def errorOutput = """
+Sending build context to Docker daemon  142.3MB
+Step 1/14 : FROM python:3.11-slim
+ ---> a6d8a6f3e5c2
+Step 2/14 : WORKDIR /app
+ ---> Using cache
+Step 3/14 : COPY requirements.txt .
+ ---> Using cache
+Step 4/14 : RUN pip install --no-cache-dir -r requirements.txt
+ ---> Running in 3e5d7f9a1b2c
+Collecting fastapi==0.111.0
+  Downloading fastapi-0.111.0-py3-none-any.whl (92 kB)
+Collecting uvicorn[standard]==0.30.0
+  Downloading uvicorn-0.30.0-py3-none-any.whl (47 kB)
+Collecting langchain==0.2.6
+  Downloading langchain-0.2.6-py3-none-any.whl (1.0 MB)
+
+ERROR: failed to solve: failed to copy: write /var/lib/docker/tmp/GetImageBlob12345678: no space left on device
+
+error: failed to solve with frontend dockerfile.v0: failed to solve: failed to build LLB: failed to copy: write /var/lib/docker/tmp/GetImageBlob: no space left on device
+"""
+                    echo errorOutput
+                    aeon_notify(
+                        'failure',
+                        'Docker build failed: no space left on device — CI runner disk full (Docker layer cache)',
+                        errorOutput
+                    )
+                    error("Docker build failed: no space left on device")
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                echo "Running Trivy vulnerability scan..."
+            }
+        }
+
+        stage('Push to Registry') {
+            steps {
+                echo "Pushing ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}..."
+            }
+        }
+    }
+
+    post {
+        success {
+            aeon_notify('success')
+            echo "Image pushed: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+        }
+        aborted {
+            aeon_notify('aborted')
+        }
+        always {
+            echo "Disk usage tip: run 'docker system prune -af' on the runner if builds start failing"
+        }
+    }
+}

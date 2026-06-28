@@ -1,0 +1,46 @@
+{
+  "name": "Notify Slack on CI Failure",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-ci-failure",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "aeon-ci-failure"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nreturn [{\n  json: {\n    text: `🚨 *CI Failure Detected*\\nPipeline: ${data.pipeline || 'unknown'}\\nError: ${data.error || 'Build failed'}\\nAnalyzed by Aeon AI`,\n    processed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Format Message", "type": "main", "index": 0 }]] },
+    "Format Message": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "aeon-demo" }]
+}

@@ -1,0 +1,145 @@
+/**
+ * Aeon Demo — Frontend Build Pipeline
+ *
+ * Simulates a Node.js / Vite project that fails due to a missing
+ * path alias (@/components/Button). Notifies Aeon on every run.
+ *
+ * Prerequisites:
+ *   - HTTP Request plugin installed in Jenkins
+ *   - AEON_URL credential (Secret text) set to your Aeon backend URL
+ */
+
+// ── Aeon notification helper ────────────────────────────────────────────────
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source":        "jenkins",
+            "name":          "${env.JOB_NAME}",
+            "status":        "${status}",
+            "repo":          "acme/frontend-app",
+            "branch":        "${env.GIT_BRANCH ?: env.BRANCH_NAME ?: 'feature/new-dashboard'}",
+            "build_number":  ${env.BUILD_NUMBER},
+            "url":           "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}",
+            "logs":          "${safeLogs}",
+            "commit_sha":    "${env.GIT_COMMIT ?: ''}"
+        }"""
+        try {
+            httpRequest(
+                url: "${AEON}/api/pipelines/ingest",
+                httpMode: 'POST',
+                contentType: 'APPLICATION_JSON',
+                requestBody: payload,
+                timeout: 10,
+                validResponseCodes: '100:299'
+            )
+            echo "✅ Aeon notified: ${status}"
+        } catch (Exception e) {
+            echo "⚠️  Aeon notification failed (non-critical): ${e.message}"
+        }
+    }
+}
+
+// ── Pipeline ────────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 10, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        NODE_ENV = 'production'
+        APP_NAME = 'frontend-app'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "📦 Checking out branch: feature/new-dashboard"
+                echo "Commit: a3f9c12b  Author: dev@acme.com"
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                echo "🔧 Running: npm ci"
+                echo "npm warn deprecated inflight@1.0.6: This module is not supported..."
+                echo "npm warn deprecated glob@7.2.3: Glob versions prior to v9..."
+                echo ""
+                echo "added 1483 packages in 14.2s"
+                echo "183 packages are looking for funding — run npm fund for details"
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                echo "🔍 Running: npm run lint"
+                echo ""
+                echo "> aeon-frontend@0.1.0 lint"
+                echo "> eslint src --ext .js,.jsx --max-warnings=0"
+                echo ""
+                echo "✓ 47 files passed ESLint"
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    def errorOutput = """
+vite v5.4.21 building for production...
+
+transforming...
+
+✗ 1 error encountered.
+
+error during build:
+Error: Cannot find module '@/components/Button'
+    at resolve (/app/node_modules/vite/dist/node/chunks/dep-jDlqpMoJ.js:48773:19)
+    at resolveId (/app/node_modules/vite/dist/node/chunks/dep-jDlqpMoJ.js:48755:20)
+
+The file '@/components/Button' cannot be found.
+Check that path aliases are configured in vite.config.js:
+  resolve: {
+    alias: { '@': path.resolve(__dirname, 'src') }
+  }
+
+Build failed in 1.23s
+"""
+                    echo "🏗️  Running: npm run build"
+                    echo errorOutput
+                    aeon_notify(
+                        'failure',
+                        "Cannot find module '@/components/Button' — missing vite.config.js alias",
+                        errorOutput
+                    )
+                    error("Build failed: Module resolution error '@/components/Button'")
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo "🚀 Deploying to staging..."
+            }
+        }
+    }
+
+    post {
+        success {
+            aeon_notify('success')
+            echo "✅ Pipeline completed successfully"
+        }
+        aborted {
+            aeon_notify('aborted')
+        }
+        always {
+            echo "Pipeline status: ${currentBuild.currentResult}"
+        }
+    }
+}

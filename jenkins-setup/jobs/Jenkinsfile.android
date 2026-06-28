@@ -1,0 +1,140 @@
+/**
+ * Aeon Demo — Android Build Pipeline
+ *
+ * Simulates an Android / Gradle project that fails due to an
+ * androidx.core version conflict. Notifies Aeon on every run.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source":        "jenkins",
+            "name":          "${env.JOB_NAME}",
+            "status":        "${status}",
+            "repo":          "acme/android-app",
+            "branch":        "${env.GIT_BRANCH ?: 'main'}",
+            "build_number":  ${env.BUILD_NUMBER},
+            "url":           "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}",
+            "logs":          "${safeLogs}",
+            "commit_sha":    "${env.GIT_COMMIT ?: ''}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON', requestBody: payload,
+                        timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) {
+            echo "⚠️  Aeon notification failed: ${e.message}"
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 20, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        ANDROID_HOME     = '/opt/android-sdk'
+        GRADLE_OPTS      = '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "📦 Branch: main  Commit: c9a1f03"
+                echo "Fetching submodules..."
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                echo "🔍 ./gradlew lint"
+                echo "> Configure project :app"
+                echo "> Task :app:lint"
+                echo "Lint found no issues."
+                echo "BUILD SUCCESSFUL in 8s"
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                echo "🧪 ./gradlew testDebugUnitTest"
+                echo "> Task :app:testDebugUnitTest"
+                echo "Tests run: 89, passed: 89, failed: 0"
+                echo "BUILD SUCCESSFUL in 22s"
+            }
+        }
+
+        stage('Build APK') {
+            steps {
+                script {
+                    def errorOutput = """
+> Configure project :app
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:compileReleaseKotlin
+> Task :app:compileReleaseJavaWithJavac
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:checkReleaseDuplicateClasses'.
+> Could not resolve com.google.android.material:material:1.9.0.
+  Dependency resolution failed on component:
+  > Module 'androidx.core:core' has been requested in conflicting versions:
+      - 1.12.0 from :app
+      - 1.15.0 from androidx.activity:activity:1.8.2 (transitive)
+
+  Resolution strategy: fail on conflict.
+
+* Fix:
+  Add to app/build.gradle:
+    configurations.all {
+        resolutionStrategy.force 'androidx.core:core-ktx:1.15.0'
+        resolutionStrategy.force 'androidx.core:core:1.15.0'
+    }
+
+* Try:
+  Run with --stacktrace option to get the stack trace.
+  Run with --info or --debug option to get more log output.
+  Run with --scan to get full insights.
+
+BUILD FAILED in 1m 12s
+"""
+                    echo errorOutput
+                    aeon_notify(
+                        'failure',
+                        'Gradle dependency conflict: androidx.core version mismatch (1.12.0 vs 1.15.0)',
+                        errorOutput
+                    )
+                    error("Gradle build failed: androidx.core version conflict")
+                }
+            }
+        }
+
+        stage('Sign & Upload') {
+            steps {
+                echo "🔏 Signing APK..."
+                echo "📤 Uploading to Firebase App Distribution..."
+            }
+        }
+    }
+
+    post {
+        success {
+            aeon_notify('success')
+            echo "✅ APK built and uploaded successfully"
+        }
+        aborted {
+            aeon_notify('aborted')
+        }
+    }
+}

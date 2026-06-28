@@ -1,0 +1,87 @@
+name: Android Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run lint
+        run: ./gradlew lint
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Build release APK
+        id: build
+        run: ./gradlew assembleRelease
+
+      - name: Upload APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      # ── Notify Aeon ────────────────────────────────────────────────────────
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":        \"github\",
+              \"name\":          \"${{ github.workflow }}\",
+              \"status\":        \"failure\",
+              \"repo\":          \"${{ github.repository }}\",
+              \"branch\":        \"${{ github.ref_name }}\",
+              \"run_id\":        \"${{ github.run_id }}\",
+              \"url\":           \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"Gradle build failed — check for dependency version conflicts (androidx.core)\",
+              \"commit_sha\":    \"${{ github.sha }}\",
+              \"triggered_by\":  \"${{ github.actor }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":      \"github\",
+              \"name\":        \"${{ github.workflow }}\",
+              \"status\":      \"success\",
+              \"repo\":        \"${{ github.repository }}\",
+              \"branch\":      \"${{ github.ref_name }}\",
+              \"run_id\":      \"${{ github.run_id }}\",
+              \"url\":         \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\":  \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"

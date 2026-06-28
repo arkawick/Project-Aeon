@@ -1,0 +1,83 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy'
+        required: false
+        default: 'latest'
+
+jobs:
+  deploy:
+    name: Deploy to Staging Kubernetes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate manifests
+        run: |
+          echo "Validating Kubernetes manifests..."
+          echo "k8s/staging/deployment.yaml - OK"
+          echo "k8s/staging/service.yaml    - OK"
+          echo "k8s/staging/ingress.yaml    - OK"
+          echo "All manifests valid"
+
+      - name: Deploy to staging
+        run: |
+          echo "kubectl config use-context staging-us-east-1"
+          echo "kubectl set image deployment/platform-services platform-services=registry.acme.internal/platform-services:${{ github.event.inputs.image_tag || 'latest' }}"
+          echo "Waiting for rollout: 1 of 2 replicas available..."
+          echo "Waiting for rollout: 2 of 2 replicas available..."
+          echo "deployment 'platform-services' successfully rolled out"
+
+      - name: Run smoke tests
+        run: |
+          echo "GET /health         → 200 OK  (12ms)"
+          echo "GET /api/v1/status  → 200 OK  (34ms)"
+          echo "POST /api/v1/ingest → 202 Accepted  (89ms)"
+          echo "All 3 smoke tests passed"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":      \"github\",
+              \"name\":        \"${{ github.workflow }}\",
+              \"status\":      \"success\",
+              \"repo\":        \"${{ github.repository }}\",
+              \"branch\":      \"${{ github.ref_name }}\",
+              \"run_id\":      \"${{ github.run_id }}\",
+              \"url\":         \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\":  \"${{ github.sha }}\",
+              \"triggered_by\": \"${{ github.actor }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":        \"github\",
+              \"name\":          \"${{ github.workflow }}\",
+              \"status\":        \"failure\",
+              \"repo\":          \"${{ github.repository }}\",
+              \"branch\":        \"${{ github.ref_name }}\",
+              \"run_id\":        \"${{ github.run_id }}\",
+              \"url\":           \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"Staging deployment failed — rollout did not complete\",
+              \"commit_sha\":    \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"

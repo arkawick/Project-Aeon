@@ -1,0 +1,91 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Unit + Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v --tb=short
+
+      - name: Run integration tests
+        id: integration
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/testdb
+        run: pytest tests/integration/ -v --tb=long
+
+      # ── Notify Aeon ────────────────────────────────────────────────────────
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          ERROR_SUMMARY="${{ steps.integration.outcome == 'failure' && 'Integration tests failed — possible OOM or DB connection issue' || 'Unit tests failed' }}"
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":        \"github\",
+              \"name\":          \"${{ github.workflow }}\",
+              \"status\":        \"failure\",
+              \"repo\":          \"${{ github.repository }}\",
+              \"branch\":        \"${{ github.ref_name }}\",
+              \"run_id\":        \"${{ github.run_id }}\",
+              \"url\":           \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"${ERROR_SUMMARY}\",
+              \"commit_sha\":    \"${{ github.sha }}\",
+              \"triggered_by\":  \"${{ github.actor }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":      \"github\",
+              \"name\":        \"${{ github.workflow }}\",
+              \"status\":      \"success\",
+              \"repo\":        \"${{ github.repository }}\",
+              \"branch\":      \"${{ github.ref_name }}\",
+              \"run_id\":      \"${{ github.run_id }}\",
+              \"url\":         \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\":  \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"

@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg:      #282c34;
+  --panel:   #21252b;
+  --border:  #355a66;
+  --fg:      #9cdef2;
+  --red:     #e06c75;
+  --green:   #50fa7b;
+  --warn:    #f0ad4e;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  font-family: 'Fira Code', ui-monospace, monospace;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar        { width: 7px; height: 7px; }
+::-webkit-scrollbar-track  { background: var(--panel); }
+::-webkit-scrollbar-thumb  { background: var(--red); border-radius: 4px; border: 2px solid var(--panel); }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--red) 80%, white); }
+html { scrollbar-color: var(--red) var(--panel); scrollbar-width: thin; }
+
+/* ── Inputs & textareas inherit the monospace font ── */
+input, textarea, select, button { font-family: inherit; }
+
+/* ── Selection color ── */
+::selection { background: color-mix(in srgb, var(--red) 35%, transparent); color: var(--fg); }

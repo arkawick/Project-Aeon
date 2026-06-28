@@ -1,0 +1,126 @@
+/**
+ * Aeon Demo — Backend Integration Test Pipeline
+ *
+ * Simulates a Spring Boot / Maven project that fails with an
+ * OutOfMemoryError during integration tests. Notifies Aeon on every run.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source":        "jenkins",
+            "name":          "${env.JOB_NAME}",
+            "status":        "${status}",
+            "repo":          "acme/data-service",
+            "branch":        "${env.GIT_BRANCH ?: 'develop'}",
+            "build_number":  ${env.BUILD_NUMBER},
+            "url":           "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}",
+            "logs":          "${safeLogs}",
+            "commit_sha":    "${env.GIT_COMMIT ?: ''}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON', requestBody: payload,
+                        timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) {
+            echo "⚠️  Aeon notification failed: ${e.message}"
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        JAVA_OPTS = '-Xmx512m -XX:MaxMetaspaceSize=256m'
+        MAVEN_OPTS = '-Dmaven.test.failure.ignore=false'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "📦 Branch: develop  Commit: b7e2d41"
+            }
+        }
+
+        stage('Compile') {
+            steps {
+                echo "⚙️  mvn compile -q"
+                echo "[INFO] Building data-service 2.3.1"
+                echo "[INFO] BUILD SUCCESS"
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                echo "🧪 mvn test"
+                echo "[INFO] Running DataServiceTest"
+                echo "[INFO] Running UserRepositoryTest"
+                echo "[INFO] Running ApiControllerTest"
+                echo "[INFO] Tests run: 142, Failures: 0, Errors: 0, Skipped: 0"
+                echo "[INFO] BUILD SUCCESS — unit tests passed in 18.4s"
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                script {
+                    def errorOutput = """
+[INFO] --- maven-failsafe-plugin:3.2.5:integration-test ---
+[INFO] Running com.acme.dataservice.ConnectionPoolIntegrationTest
+[INFO] Running com.acme.dataservice.DataServiceIntegrationTest
+[INFO] Running com.acme.dataservice.ConcurrencyIntegrationTest
+
+[ERROR] java.lang.OutOfMemoryError: Java heap space
+    at java.base/java.util.Arrays.copyOf(Arrays.java:3236)
+    at com.acme.dataservice.pool.ConnectionPool.allocate(ConnectionPool.java:87)
+    at com.acme.dataservice.pool.ConnectionPool.getConnection(ConnectionPool.java:54)
+    at com.acme.dataservice.test.ConcurrencyIntegrationTest.testConcurrentConnections(ConcurrencyIntegrationTest.java:134)
+
+[ERROR] Tests run: 67, Failures: 1, Errors: 2, Skipped: 0, Time elapsed: 34.871 s <<<FAILURE!
+[ERROR] ConcurrencyIntegrationTest.testConcurrentConnections -- Time elapsed: 12.4 s <<<ERROR!
+[INFO] BUILD FAILURE
+
+Fix options:
+  1. Increase JVM heap: JAVA_OPTS=-Xmx2g in Jenkins job config
+  2. Release connections in teardown: add @AfterEach connection.close()
+  3. Use connection pool with bounded size: HikariCP maxPoolSize=5
+"""
+                    echo errorOutput
+                    aeon_notify(
+                        'failure',
+                        'OutOfMemoryError: Java heap space in ConnectionPoolIntegrationTest',
+                        errorOutput
+                    )
+                    error("Integration tests failed: OutOfMemoryError in connection pool")
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                echo "📦 mvn package -DskipTests"
+                echo "[INFO] Building JAR: data-service-2.3.1.jar"
+            }
+        }
+    }
+
+    post {
+        success {
+            aeon_notify('success')
+        }
+        aborted {
+            aeon_notify('aborted')
+        }
+    }
+}

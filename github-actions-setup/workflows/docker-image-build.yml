@@ -1,0 +1,88 @@
+name: Docker Image Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Dockerfile
+        run: |
+          echo "FROM python:3.11-slim" > Dockerfile
+          echo "WORKDIR /app" >> Dockerfile
+          echo "COPY . ." >> Dockerfile
+          echo "RUN pip install fastapi uvicorn" >> Dockerfile
+          echo "CMD [\"uvicorn\", \"main:app\"]" >> Dockerfile
+          docker run --rm -i hadolint/hadolint < Dockerfile || true
+
+      - name: Build Docker image
+        id: build
+        run: |
+          # Simulate disk-full error that Aeon knows how to diagnose
+          echo "Simulating Docker build failure: no space left on device"
+          echo "Step 1/5 : FROM python:3.11-slim"
+          echo " ---> a6d8a6f3e5c2"
+          echo "Step 2/5 : WORKDIR /app"
+          echo " ---> Using cache"
+          echo "Step 3/5 : COPY . ."
+          echo "ERROR: failed to solve: write /var/lib/docker/tmp/GetImageBlob: no space left on device"
+          exit 1
+
+      - name: Push to registry
+        if: success()
+        run: echo "Pushing image to registry..."
+
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          LOGS="Docker build failed: no space left on device. Step failed: COPY . . — Docker layer cache consumed all available disk space on the runner. Fix: docker system prune -af before builds."
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":        \"github\",
+              \"name\":          \"${{ github.workflow }}\",
+              \"status\":        \"failure\",
+              \"repo\":          \"${{ github.repository }}\",
+              \"branch\":        \"${{ github.ref_name }}\",
+              \"run_id\":        \"${{ github.run_id }}\",
+              \"url\":           \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"Docker build failed: no space left on device — CI runner disk full (Docker layer cache bloat)\",
+              \"logs\":          \"${LOGS}\",
+              \"commit_sha\":    \"${{ github.sha }}\",
+              \"triggered_by\":  \"${{ github.actor }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\":      \"github\",
+              \"name\":        \"${{ github.workflow }}\",
+              \"status\":      \"success\",
+              \"repo\":        \"${{ github.repository }}\",
+              \"branch\":      \"${{ github.ref_name }}\",
+              \"run_id\":      \"${{ github.run_id }}\",
+              \"url\":         \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\":  \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"
