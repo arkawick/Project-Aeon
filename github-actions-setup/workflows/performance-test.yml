@@ -1,0 +1,93 @@
+name: Performance Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      vus:
+        description: 'Number of virtual users'
+        default: '25'
+      duration:
+        description: 'Test duration (e.g. 5m)'
+        default: '5m'
+
+jobs:
+  k6:
+    name: k6 Load Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update && sudo apt-get install k6 -y
+
+      - name: Run load test
+        env:
+          TARGET_URL: ${{ secrets.STAGING_URL || 'https://staging.acme.internal' }}
+          VUS: ${{ github.event.inputs.vus || '25' }}
+          DURATION: ${{ github.event.inputs.duration || '5m' }}
+        run: |
+          k6 run \
+            --vus $VUS \
+            --duration $DURATION \
+            --out json=k6-results.json \
+            tests/performance/api-load.js
+
+      - name: Parse results and check thresholds
+        run: |
+          p95=$(cat k6-results.json | jq '[.[] | select(.type=="Point" and .metric=="http_req_duration" and .data.tags.percentile=="p(95)") | .data.value] | last // 0')
+          echo "p95 latency: ${p95}ms"
+          if (( $(echo "$p95 > 500" | bc -l) )); then
+            echo "FAIL: p95 ${p95}ms exceeds 500ms threshold"
+            exit 1
+          fi
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results
+          path: k6-results.json
+          retention-days: 30
+
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"failure\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"p95 latency exceeded 500ms SLA threshold\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"success\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"

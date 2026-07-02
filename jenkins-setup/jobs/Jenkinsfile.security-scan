@@ -1,0 +1,84 @@
+/**
+ * Aeon Demo — Security Scan Pipeline
+ * Simulates OWASP dependency check + Trivy container scan.
+ * Fails on a known CVE in a pinned dependency.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source": "jenkins", "name": "${env.JOB_NAME}", "status": "${status}",
+            "repo": "acme/backend-api", "branch": "${env.GIT_BRANCH ?: 'main'}",
+            "build_number": ${env.BUILD_NUMBER}, "url": "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}", "logs": "${safeLogs}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                contentType: 'APPLICATION_JSON', requestBody: payload,
+                timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) { echo "⚠️  Aeon notification failed: ${e.message}" }
+    }
+}
+
+pipeline {
+    agent any
+    options { timestamps(); timeout(time: 15, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '20')) }
+
+    stages {
+        stage('Checkout') {
+            steps { echo "📦 Checking out main — commit: d7e2a91b" }
+        }
+        stage('OWASP Dependency Check') {
+            steps {
+                echo "🔍 Running OWASP dependency-check..."
+                echo "Downloading NVD data feeds..."
+                echo "Analyzing 247 dependencies..."
+                echo ""
+                echo "[INFO] Analysis complete (38.4s)"
+                echo "[WARN] CVE-2024-38374 — org.springframework:spring-core:5.3.27"
+                echo "       CVSS Score: 8.1 (HIGH) — Deserialization of Untrusted Data"
+                echo "[WARN] CVE-2024-22243 — org.springframework:spring-web:5.3.27"
+                echo "       CVSS Score: 7.5 (HIGH) — Open Redirect"
+            }
+        }
+        stage('Trivy Container Scan') {
+            steps {
+                script {
+                    def errorOutput = """
+2024-01-15T09:22:11.442Z INFO  Vulnerability scanning is enabled
+2024-01-15T09:22:11.442Z INFO  Detecting library vulnerabilities...
+
+acme/backend-api:latest (debian 12.4)
+
+Total: 3 (HIGH: 2, CRITICAL: 1)
+
+┌─────────────┬────────────────┬──────────┬───────────────────┬────────────────────┐
+│   Library   │ Vulnerability  │ Severity │ Installed Version │    Fixed Version   │
+├─────────────┼────────────────┼──────────┼───────────────────┼────────────────────┤
+│ libssl3     │ CVE-2024-0727  │ CRITICAL │ 3.0.11-1~deb12u2  │ 3.0.13-1~deb12u1  │
+│ libssl3     │ CVE-2024-2511  │ HIGH     │ 3.0.11-1~deb12u2  │ 3.0.13-1~deb12u1  │
+│ libexpat1   │ CVE-2024-28757 │ HIGH     │ 2.5.0-1           │ 2.6.2-1           │
+└─────────────┴────────────────┴──────────┴───────────────────┴────────────────────┘
+
+FAILED: 1 CRITICAL vulnerability found — threshold exceeded
+"""
+                    echo errorOutput
+                    aeon_notify('failure',
+                        'CRITICAL CVE-2024-0727 in libssl3:3.0.11 — update base image to debian:12.5+',
+                        errorOutput)
+                    error("Security scan failed: CRITICAL vulnerability CVE-2024-0727")
+                }
+            }
+        }
+        stage('SAST Analysis') {
+            steps { echo "🛡️  Running Semgrep SAST..." }
+        }
+    }
+    post {
+        success { aeon_notify('success'); echo "✅ No critical vulnerabilities found" }
+        aborted { aeon_notify('aborted') }
+        always  { echo "Security scan status: ${currentBuild.currentResult}" }
+    }
+}

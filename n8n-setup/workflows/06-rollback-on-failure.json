@@ -1,0 +1,119 @@
+{
+  "name": "Production Deploy Failure → Auto Rollback",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-prod-failure",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-06",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-prod-failure"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.status }}", "operation": "equals", "value2": "failure" },
+            { "value1": "={{ $json.environment }}", "operation": "equals", "value2": "production" }
+          ]
+        }
+      },
+      "id": "node-filter-06",
+      "name": "Production Failures Only",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nreturn [{\n  json: {\n    rollback_id: `rollback-${Date.now()}`,\n    target_environment: 'production',\n    rollback_to: data.previous_sha || data.last_known_good || 'HEAD~1',\n    reason: data.error_summary || 'Production deploy failure detected by Aeon',\n    initiated_by: 'aeon-automation',\n    pipeline: data.pipeline || data.name,\n    failed_sha: data.commit_sha,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-prep-06",
+      "name": "Prepare Rollback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://deploy.acme.internal/api/rollback",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $credentials.deployApiToken }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "node-rollback-06",
+      "name": "Trigger Rollback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "text": "=🔄 *Auto-Rollback Initiated* — Production deploy failed\nRolling back `{{ $('Prepare Rollback').item.json.pipeline }}` to `{{ $('Prepare Rollback').item.json.rollback_to }}`\nReason: {{ $('Prepare Rollback').item.json.reason }}\nRollback ID: `{{ $('Prepare Rollback').item.json.rollback_id }}`",
+        "otherOptions": { "channel": "#incidents" }
+      },
+      "id": "node-slack-06",
+      "name": "Alert Slack #incidents",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1280, 200],
+      "credentials": {
+        "slackApi": { "id": "slack-aeon", "name": "Slack Aeon" }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"rollback_initiated\", \"rollback_id\": \"{{ $('Prepare Rollback').item.json.rollback_id }}\" }"
+      },
+      "id": "node-respond-06",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"skipped\", \"reason\": \"not a production failure\" }"
+      },
+      "id": "node-skip-06",
+      "name": "Skip",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Production Failures Only", "type": "main", "index": 0 }]] },
+    "Production Failures Only": {
+      "main": [
+        [{ "node": "Prepare Rollback", "type": "main", "index": 0 }],
+        [{ "node": "Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Rollback": { "main": [[{ "node": "Trigger Rollback", "type": "main", "index": 0 }]] },
+    "Trigger Rollback": { "main": [[{ "node": "Alert Slack #incidents", "type": "main", "index": 0 }]] },
+    "Alert Slack #incidents": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "rollback" }, { "name": "production" }],
+  "notes": "Triggered when Aeon detects a production environment deploy failure. Automatically initiates a rollback to the last known good SHA via the deploy API and posts an incident alert to Slack #incidents."
+}

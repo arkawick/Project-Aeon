@@ -2,28 +2,40 @@
 """
 Aeon Jenkins Job Seeder
 =======================
-Creates all 5 demo pipeline jobs in Jenkins via the REST API.
+Creates all 10 demo pipeline jobs in Jenkins via the REST API.
 No plugins needed beyond what the Aeon Dockerfile already installs.
 
 Usage:
     pip install requests
-    python create_jobs.py
+    python create_jobs.py --token YOUR_API_TOKEN
+    python create_jobs.py --url http://localhost:8088 --user admin --token YOUR_API_TOKEN
 
-    # Custom host/credentials:
-    JENKINS_URL=http://localhost:8088 JENKINS_USER=admin JENKINS_TOKEN=admin python create_jobs.py
+To generate a token:
+    Jenkins → click your username (top-right) → Configure → API Token → Add new Token
 """
 
+import argparse
+import getpass
 import os
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 import requests
 from requests.auth import HTTPBasicAuth
 
-JENKINS_URL   = os.getenv("JENKINS_URL",   "http://localhost:8088")
-JENKINS_USER  = os.getenv("JENKINS_USER",  "admin")
-JENKINS_TOKEN = os.getenv("JENKINS_TOKEN", "admin")
-AEON_URL      = os.getenv("AEON_URL",      "http://localhost:8000")
+parser = argparse.ArgumentParser(description="Seed Aeon demo jobs into Jenkins")
+parser.add_argument("--url",      default=os.getenv("JENKINS_URL",   "http://localhost:8088"), help="Jenkins base URL")
+parser.add_argument("--user",     default=os.getenv("JENKINS_USER",  "admin"),                 help="Jenkins username")
+parser.add_argument("--token",    default=os.getenv("JENKINS_TOKEN", ""),                      help="Jenkins API token (prompted if omitted)")
+parser.add_argument("--aeon-url", default=os.getenv("AEON_URL",      "http://localhost:8000"), help="Aeon backend URL stored as credential")
+args = parser.parse_args()
+
+if not args.token:
+    args.token = getpass.getpass(f"Jenkins API token for '{args.user}': ")
+
+JENKINS_URL   = args.url.rstrip("/")
+JENKINS_USER  = args.user
+JENKINS_TOKEN = args.token
+AEON_URL      = args.aeon_url
 
 JOBS_DIR = Path(__file__).parent / "jobs"
 
@@ -52,6 +64,31 @@ JOBS = [
         "name":        "deploy-staging",
         "description": "Staging deploy to Kubernetes — succeeds (healthy baseline pipeline)",
         "jenkinsfile": JOBS_DIR / "Jenkinsfile.deploy",
+    },
+    {
+        "name":        "security-scan",
+        "description": "OWASP + Trivy scan — fails: CRITICAL CVE-2024-0727 in libssl3",
+        "jenkinsfile": JOBS_DIR / "Jenkinsfile.security-scan",
+    },
+    {
+        "name":        "integration-tests",
+        "description": "Playwright E2E — fails: login session cookie regression on auth-refactor",
+        "jenkinsfile": JOBS_DIR / "Jenkinsfile.integration-tests",
+    },
+    {
+        "name":        "performance-test",
+        "description": "k6 load test — fails: p95 latency 847ms exceeds 500ms SLA threshold",
+        "jenkinsfile": JOBS_DIR / "Jenkinsfile.performance-test",
+    },
+    {
+        "name":        "ios-build",
+        "description": "Xcode/Swift build — fails: firebase-ios-sdk SPM version conflict",
+        "jenkinsfile": JOBS_DIR / "Jenkinsfile.ios-build",
+    },
+    {
+        "name":        "release",
+        "description": "Release pipeline — succeeds: builds, tags, and pushes v2.4.1 to registry",
+        "jenkinsfile": JOBS_DIR / "Jenkinsfile.release",
     },
 ]
 

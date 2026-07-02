@@ -1,0 +1,107 @@
+/**
+ * Aeon Demo — Integration Test Pipeline
+ * Spins up a Docker Compose test environment and runs Playwright E2E tests.
+ * Fails on a login flow regression introduced in feature/auth-refactor.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source": "jenkins", "name": "${env.JOB_NAME}", "status": "${status}",
+            "repo": "acme/frontend-app", "branch": "${env.GIT_BRANCH ?: 'feature/auth-refactor'}",
+            "build_number": ${env.BUILD_NUMBER}, "url": "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}", "logs": "${safeLogs}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                contentType: 'APPLICATION_JSON', requestBody: payload,
+                timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) { echo "⚠️  Aeon notification failed: ${e.message}" }
+    }
+}
+
+pipeline {
+    agent any
+    options { timestamps(); timeout(time: 20, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '20')) }
+
+    environment {
+        TEST_BASE_URL = 'http://localhost:3001'
+        PLAYWRIGHT_BROWSERS_PATH = '/tmp/playwright-browsers'
+    }
+
+    stages {
+        stage('Checkout') { steps { echo "📦 Checking out feature/auth-refactor" } }
+        stage('Start Test Environment') {
+            steps {
+                echo "🐳 Starting Docker Compose test stack..."
+                echo "Container aeon-test-db started"
+                echo "Container aeon-test-api started"
+                echo "Container aeon-test-frontend started"
+                echo "Waiting for health checks... ✓"
+            }
+        }
+        stage('Install Test Deps') {
+            steps {
+                echo "📦 npm ci --prefix tests/e2e"
+                echo "npx playwright install chromium firefox"
+                echo "✓ Browsers installed"
+            }
+        }
+        stage('Smoke Tests') {
+            steps {
+                echo "💨 Running smoke tests (5/5 passed)"
+                echo "  ✓ API /health returns 200"
+                echo "  ✓ Frontend loads"
+                echo "  ✓ Database connection"
+                echo "  ✓ Auth endpoint responds"
+                echo "  ✓ WebSocket upgrade"
+            }
+        }
+        stage('E2E Tests') {
+            steps {
+                script {
+                    def errorOutput = """
+Running 47 tests using 4 workers
+
+  ✓  auth › login with valid credentials (1.2s)
+  ✓  auth › redirect to login when unauthenticated (0.4s)
+  ✗  auth › persist session across page refresh (3.1s)
+
+    Error: expect(received).toBe(expected)
+    Expected: "John Doe"
+    Received: undefined
+
+    Selector .user-display-name not found after page reload.
+    The session cookie is not being rehydrated correctly.
+
+    Possible cause: auth-refactor changed cookie domain from
+    'localhost' to 'localhost:3001' — browser rejects mismatched domain.
+
+    at login.spec.ts:88:18
+
+  ✗  dashboard › show user name in header (0.3s)
+  ✗  pipeline › trigger rebuild as authenticated user (2.8s)
+
+Flaky tests found: 1 (network-timeout on CI)
+Failed: 3 | Passed: 43 | Skipped: 1
+"""
+                    echo errorOutput
+                    aeon_notify('failure',
+                        'E2E login regression: session cookie domain mismatch after auth-refactor (localhost vs localhost:3001)',
+                        errorOutput)
+                    error("Integration tests failed: 3 E2E tests failed")
+                }
+            }
+        }
+    }
+    post {
+        success { aeon_notify('success'); echo "✅ All integration tests passed" }
+        aborted { aeon_notify('aborted') }
+        always  {
+            echo "Tearing down test environment..."
+            echo "Integration test status: ${currentBuild.currentResult}"
+        }
+    }
+}

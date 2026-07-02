@@ -2,7 +2,7 @@
 
 > Every incident your team has ever seen. Every failure that's coming next. One workspace.
 
-**"Odysseus for DevOps"** — an AI ops workspace that combines GitHub Actions, Jenkins, n8n, persistent incident memory (ChromaDB + Neo4j), and a LangGraph agent for CI/CD root cause analysis, automated remediation, and deep research.
+**"Odysseus for DevOps"** — an AI ops workspace that combines GitHub Actions, Jenkins, n8n, persistent incident memory (ChromaDB + Neo4j), and a LangGraph agent for CI/CD root cause analysis, automated remediation, and deep code intelligence.
 
 ![Aeon Demo](demo.gif)
 
@@ -18,10 +18,16 @@ When a build fails, Aeon doesn't just show you the error. It:
 4. **Acts** — auto-creates GitHub issues, proposes PRs (with human-in-the-loop approval)
 5. **Learns** — writes every new analysis back to memory so the AI gets smarter over time
 
+And beyond incident response, two AI intelligence features answer the hardest questions in any codebase:
+
+- **"Why is this code the way it is?"** → Code Provenance: traces commits → PRs → issues with AI evolution narrative
+- **"What breaks if I merge this?"** → Blast Radius: maps every changed file to impacted services with AI risk assessment
+
 ---
 
 ## Demo Flow
 
+### Incident Response
 ```
 Push to GitHub / Jenkins build runs
         ↓
@@ -38,12 +44,35 @@ Suggested fix included
 Click "Create Issue"  →  GitHub issue created live
 Click "Approve PR"    →  PR created (human in the loop)
         ↓
-Switch to Deep Research mode for full incident investigation
-Generate post-mortem report (.md download)
-        ↓
-Open in Odysseus  →  continue research in extended AI workspace
-        ↓
 Incident stored in memory — AI improves for next time
+```
+
+### Code Provenance
+```
+Enter: public GitHub repo + file path
+        ↓
+Aeon traces commit history → linked PRs → linked issues
+        ↓
+Graph renders: File → Commits → PRs → Issues → Developers
+        ↓
+AI Evolution Narrative: "Why is this file the way it is today?"
+        ↓
+Click any commit → see actual diff (added/removed lines)
+Toggle Timeline layout → commits ordered chronologically left→right
+```
+
+### Blast Radius
+```
+Enter: public GitHub repo + PR number
+        ↓
+Aeon fetches all changed files from GitHub API
+        ↓
+Classifies each: Service / Test / Config / Pipeline / Infra / Dependencies
+        ↓
+Radial graph: PR at center → files → impacted areas spreading outward
+        ↓
+AI risk assessment: HIGH / MEDIUM / LOW
++ deploy recommendation + "must verify" checklist
 ```
 
 ---
@@ -57,10 +86,11 @@ Incident stored in memory — AI improves for next time
 | **Post-mortem generator** | One-click incident post-mortem report, copy or download as `.md` |
 | **Incident Memory** | ChromaDB semantic search + Neo4j graph relationships across all past incidents |
 | **Knowledge Graph** | Force-directed Neo4j visualization — incident → error type → fix relationships |
-| **Pipelines** | Unified GitHub Actions + Jenkins view, auto-refresh every 30s, clickable job links |
+| **Code Provenance** | Trace any file's full history: commits → PRs → issues, per-node AI reasoning, real diffs, timeline layout |
+| **Blast Radius** | Map what breaks when a PR merges: files → services, AI risk level + deploy recommendation |
+| **Pipelines** | Unified GitHub Actions + Jenkins view, auto-refresh every 30s |
 | **Workflows** | n8n workflow triggers from the dashboard |
 | **Action Engine** | Auto GitHub issue creation; PR proposals with approve/reject UI |
-| **Odysseus Integration** | Contextual handoff to Odysseus extended workspace — research, chat, documents, notes |
 
 ---
 
@@ -74,21 +104,21 @@ Incident stored in memory — AI improves for next time
           ┌─────────────────┼──────────────────┐
           ↓                 ↓                  ↓
       GitHub API       Jenkins API        n8n Webhooks
-                            │
-                   LangGraph Agent
-                  (Claude Sonnet 4.6)
-                    8 tools · astream()
-                            │
-              ┌─────────────┴─────────────┐
-              ↓                           ↓
-           ChromaDB                    Neo4j
-       (vector search)          (graph relationships)
-              │
-     ┌────────┴────────┐
-     ↓                 ↓
-  Odysseus         PostgreSQL
-(extended AI       (incidents)
- workspace)
+          │                 │
+          │        LangGraph Agent
+          │       (Claude Sonnet 4.6)
+          │         8 tools · astream()
+          │                 │
+          │     ┌───────────┴───────────┐
+          │     ↓                       ↓
+          │  ChromaDB                Neo4j
+          │ (vector search)    (graph relationships)
+          │
+    ┌─────┴──────────────────────┐
+    ↓                            ↓
+provenance_service.py     blast_radius_service.py
+ (Code Provenance)          (Blast Radius)
+ commits→PRs→issues→AI      files→services→AI risk
 ```
 
 ---
@@ -108,7 +138,6 @@ Incident stored in memory — AI improves for next time
 | Graph Visualization | react-force-graph-2d |
 | CI/CD | Jenkins (Docker) + GitHub Actions |
 | Workflow Automation | n8n |
-| Extended Workspace | [Odysseus](https://github.com/pewdiepie-archdaemon/odysseus) |
 | Deployment | Docker Compose (8 services) |
 
 ---
@@ -124,7 +153,7 @@ cd Project-Aeon
 
 # 2. Configure
 cp aeon/backend/.env.example aeon/backend/.env
-# Edit aeon/backend/.env — set ANTHROPIC_API_KEY at minimum
+# Edit aeon/backend/.env — set ANTHROPIC_API_KEY and GITHUB_TOKEN
 
 # 3. Start
 cd aeon
@@ -137,13 +166,25 @@ curl -X POST http://localhost:8000/api/memory/seed
 # http://localhost:3000
 ```
 
-See [SETUP_GUIDE.md](SETUP_GUIDE.md) for the full setup including Jenkins, GitHub Actions, n8n, and Odysseus.
+---
+
+## Environment Variables
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...   # Required for AI features
+GITHUB_TOKEN=ghp_...           # Required for Code Provenance + Blast Radius
+```
+
+After editing `.env`:
+```bash
+docker compose up -d backend
+```
 
 ---
 
 ## Services
 
-| Service | URL | Default credentials |
+| Service | URL | Credentials |
 |---|---|---|
 | **Aeon UI** | http://localhost:3000 | — |
 | **Backend API** | http://localhost:8000 | — |
@@ -152,24 +193,6 @@ See [SETUP_GUIDE.md](SETUP_GUIDE.md) for the full setup including Jenkins, GitHu
 | **n8n** | http://localhost:5678 | — |
 | **Neo4j** | http://localhost:7474 | neo4j / aeon_neo4j |
 | **ChromaDB** | http://localhost:8001 | — |
-| **Odysseus** | http://localhost:7000 | admin / aeon_demo |
-
----
-
-## Odysseus Integration
-
-Aeon is built to hand off context to [Odysseus](https://github.com/pewdiepie-archdaemon/odysseus), a self-hosted AI workspace. When Odysseus is running:
-
-- The Aeon sidebar shows an **Extended Workspace** section with a live status dot and links to Odysseus Chat, Research, Documents, Email, and Notes
-- After an AI analysis, click **"Research deeper in Odysseus"** to start a Deep Research session pre-filled with the incident query
-- On any incident, click **"Research in Odysseus"** to send the root cause as a research query
-- After deep research, **"Continue in Odysseus Chat"** opens the Odysseus chat with full context
-
-To run Odysseus alongside Aeon:
-```bash
-cd odysseus-setup
-docker compose up -d
-```
 
 ---
 
@@ -188,7 +211,6 @@ tools = [
 ]
 ```
 
-Graph flow:
 ```
 search_memory → call_claude → execute_tools (loop, up to 15×) → synthesize → memory_writer
 ```
@@ -203,22 +225,31 @@ Every analysis is automatically written back to ChromaDB + Neo4j so the agent im
 Project-Aeon/
 ├── aeon/
 │   ├── backend/
-│   │   ├── api/              REST endpoints
-│   │   ├── agents/           LangGraph graph + tools
-│   │   ├── core/             Shared singletons
-│   │   ├── memory/           ChromaDB + Neo4j stores
-│   │   └── services/         GitHub, Jenkins, n8n, Odysseus clients
-│   ├── frontend/
-│   │   └── src/
-│   │       ├── pages/        Dashboard, AIAssistant, Pipelines, Incidents, Workflows, GraphView
-│   │       └── components/   Sidebar (with Odysseus section)
-│   └── docker-compose.yml    8-service stack
-├── odysseus-setup/           Odysseus docker compose + lite Dockerfile
-├── jenkins-setup/            Job DSL + seed script
-├── github-actions-setup/     5 workflow YAMLs + setup script
-├── n8n-setup/                Workflow JSONs + import script
-├── SETUP_GUIDE.md            Full setup walkthrough
-└── DEMO.md                   90-second demo runbook
+│   │   ├── api/
+│   │   │   ├── pipelines.py, incidents.py, ai.py, memory.py
+│   │   │   ├── provenance.py        ← Code Provenance API
+│   │   │   └── blast_radius.py      ← Blast Radius API
+│   │   ├── agents/                  LangGraph graph + 8 tools
+│   │   ├── core/                    Shared singletons
+│   │   ├── memory/                  ChromaDB + Neo4j stores
+│   │   └── services/
+│   │       ├── provenance_service.py    ← GitHub trace + AI narrative
+│   │       └── blast_radius_service.py  ← PR classifier + AI risk
+│   ├── frontend/src/
+│   │   ├── pages/
+│   │   │   ├── Dashboard, AIAssistant, Pipelines, Incidents, Workflows
+│   │   │   ├── GraphView.jsx        ← Knowledge Graph
+│   │   │   ├── Provenance.jsx       ← Code Provenance
+│   │   │   └── BlastRadius.jsx      ← Blast Radius
+│   │   └── components/Sidebar.jsx
+│   ├── docker-compose.yml
+│   ├── CODE_PROVENANCE.md           ← Code Provenance guide
+│   └── BLAST_RADIUS.md              ← Blast Radius guide
+├── jenkins-setup/                   10 Jenkinsfile demos + seed script
+├── github-actions-setup/            10 workflow YAMLs + setup script
+├── n8n-setup/                       10 workflow JSONs
+├── AEON_README.md                   Full technical reference
+└── DEMO.md                          90-second demo runbook
 ```
 
 ---
@@ -226,8 +257,8 @@ Project-Aeon/
 ## Key Design Decisions
 
 - **`core/instances.py`** — shared singletons, no duplicate DB connections per request
-- **`AsyncAnthropic` + `messages.stream()`** — per-token SSE streamed to the browser
+- **SSE everywhere** — AI Assistant, Code Provenance, and Blast Radius all stream progress live; the UI never blocks
 - **`memory_writer_node`** — every analysis auto-stored; the agent gets smarter with every run
 - **Human-in-the-loop PRs** — issues auto-create, PRs require explicit approval click
+- **`originalGraph` ref pattern** — ForceGraph2D mutates node objects in place; storing immutable server data separately prevents ghost traces on layout switch
 - **Mock fallback everywhere** — full demo works without any external API tokens
-- **Odysseus is additive** — Aeon works fully whether or not Odysseus is running

@@ -1,0 +1,68 @@
+{
+  "name": "CI Build Result → Microsoft Teams",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-teams-notify",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-10",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-teams-notify"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst isSuccess = data.status === 'success';\nconst themeColor = isSuccess ? '00b300' : 'cc0000';\nconst statusText = isSuccess ? '✅ Passed' : '❌ Failed';\nconst severity = (data.confidence >= 85) ? 'HIGH' : (data.confidence >= 70) ? 'MEDIUM' : 'LOW';\n\nreturn [{\n  json: {\n    '@type': 'MessageCard',\n    '@context': 'http://schema.org/extensions',\n    themeColor,\n    summary: `CI ${data.status}: ${data.pipeline || data.name}`,\n    sections: [\n      {\n        activityTitle: `**${statusText} — ${data.pipeline || data.name || 'Build'}**`,\n        activitySubtitle: `Branch: \\`${data.branch || 'main'}\\` · Repo: ${data.repo || 'unknown'}`,\n        activityImage: isSuccess\n          ? 'https://img.icons8.com/color/48/ok--v1.png'\n          : 'https://img.icons8.com/color/48/cancel--v1.png',\n        facts: [\n          { name: 'Status', value: data.status },\n          { name: 'Branch', value: data.branch || 'main' },\n          ...(data.confidence ? [{ name: 'AI Confidence', value: `${data.confidence}% (${severity})` }] : []),\n          ...(data.error_summary ? [{ name: 'Root Cause', value: data.error_summary.substring(0, 200) }] : []),\n          { name: 'Build #', value: String(data.build_number || data.run_id || 'N/A') },\n          { name: 'Commit', value: (data.commit_sha || 'unknown').substring(0, 8) }\n        ],\n        markdown: true\n      }\n    ],\n    potentialAction: [\n      {\n        '@type': 'OpenUri',\n        name: 'View in Aeon',\n        targets: [{ os: 'default', uri: 'http://localhost:3000/ai' }]\n      },\n      ...(data.url ? [{\n        '@type': 'OpenUri',\n        name: 'View Build',\n        targets: [{ os: 'default', uri: data.url }]\n      }] : [])\n    ]\n  }\n}];"
+      },
+      "id": "node-format-10",
+      "name": "Format Teams Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.teamsWebhookUrl }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-teams-10",
+      "name": "Send to Teams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"teams_notified\" }"
+      },
+      "id": "node-respond-10",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1020, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Format Teams Card", "type": "main", "index": 0 }]] },
+    "Format Teams Card": { "main": [[{ "node": "Send to Teams", "type": "main", "index": 0 }]] },
+    "Send to Teams": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "teams" }, { "name": "notification" }],
+  "notes": "Triggered by Aeon for any CI build result (pass or fail). Sends a Microsoft Teams Adaptive Card (MessageCard format) with color-coded theme, build facts, root cause if available, and action buttons linking to Aeon and the build. Requires a Teams Incoming Webhook URL in credentials."
+}

@@ -1,0 +1,118 @@
+{
+  "name": "Repeated Failures → GitHub Issue",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-github-issue",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-09",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-github-issue"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.status }}", "operation": "equals", "value2": "failure" }
+          ],
+          "number": [
+            { "value1": "={{ $json.consecutive_failures || 1 }}", "operation": "largerEqual", "value2": 3 }
+          ]
+        }
+      },
+      "id": "node-filter-09",
+      "name": "3+ Consecutive Failures",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst repoPath = data.repo || 'acme/backend-api';\nconst pipeline = data.pipeline || data.name || 'unknown';\nconst branch = data.branch || 'main';\nconst summary = data.error_summary || 'See pipeline logs for details.';\nconst consecutiveFails = data.consecutive_failures || 3;\n\nreturn [{\n  json: {\n    owner: repoPath.split('/')[0],\n    repo: repoPath.split('/')[1] || repoPath,\n    title: `[Aeon] ${pipeline} has failed ${consecutiveFails} times on ${branch}`,\n    body: `## Automated Failure Report\\n\\nAeon detected **${consecutiveFails} consecutive failures** on the \\`${pipeline}\\` pipeline.\\n\\n### Details\\n| Field | Value |\\n|-------|-------|\\n| Pipeline | \\`${pipeline}\\` |\\n| Branch | \\`${branch}\\` |\\n| Consecutive Failures | ${consecutiveFails} |\\n| Last Commit | \\`${data.commit_sha || 'unknown'}\\` |\\n| Build URL | ${data.url ? `[View Build](${data.url})` : 'N/A'} |\\n\\n### Root Cause Analysis\\n> ${summary}\\n\\n### Suggested Actions\\n- [ ] Check the [Aeon AI Assistant](http://localhost:3000/ai) for detailed root cause analysis\\n- [ ] Review recent commits on \\`${branch}\\`\\n- [ ] Check for environment or dependency changes\\n- [ ] If flaky test, mark with \\`flaky\\` label and skip temporarily\\n\\n---\\n*Auto-filed by [Aeon](http://localhost:3000) · ${new Date().toISOString()}*`,\n    labels: ['bug', 'ci-failure', 'aeon-detected']\n  }\n}];"
+      },
+      "id": "node-format-09",
+      "name": "Format GitHub Issue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 200]
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "owner": "={{ $json.owner }}",
+        "repository": "={{ $json.repo }}",
+        "title": "={{ $json.title }}",
+        "body": "={{ $json.body }}",
+        "labels": { "label": ["bug", "ci-failure", "aeon-detected"] }
+      },
+      "id": "node-github-09",
+      "name": "Create GitHub Issue",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [1020, 200],
+      "credentials": {
+        "githubApi": { "id": "github-aeon", "name": "GitHub Aeon" }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "text": "=📋 GitHub issue auto-created: *{{ $json.title }}*\n<{{ $json.html_url }}|View Issue> · Pipeline has failed {{ $('Format GitHub Issue').item.json.consecutive_failures || 3 }} times",
+        "otherOptions": { "channel": "#ci-alerts" }
+      },
+      "id": "node-slack-09",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1280, 200],
+      "credentials": {
+        "slackApi": { "id": "slack-aeon", "name": "Slack Aeon" }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"issue_created\", \"issue_url\": \"{{ $('Create GitHub Issue').item.json.html_url }}\" }"
+      },
+      "id": "node-respond-09",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"skipped\", \"reason\": \"fewer than 3 consecutive failures\" }"
+      },
+      "id": "node-skip-09",
+      "name": "Skip",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "3+ Consecutive Failures", "type": "main", "index": 0 }]] },
+    "3+ Consecutive Failures": {
+      "main": [
+        [{ "node": "Format GitHub Issue", "type": "main", "index": 0 }],
+        [{ "node": "Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format GitHub Issue": { "main": [[{ "node": "Create GitHub Issue", "type": "main", "index": 0 }]] },
+    "Create GitHub Issue": { "main": [[{ "node": "Notify Slack", "type": "main", "index": 0 }]] },
+    "Notify Slack": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "github" }, { "name": "issue-tracking" }],
+  "notes": "Triggered when Aeon reports 3 or more consecutive failures on the same pipeline. Automatically creates a GitHub issue with full context, root cause analysis, and a checklist. Notifies #ci-alerts in Slack with a link to the issue."
+}

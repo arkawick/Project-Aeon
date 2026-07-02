@@ -115,4 +115,26 @@ export async function startOdysseusResearch(query) {
   return data
 }
 
+// Code Provenance Graph
+export function streamProvenance(repo, filePath, maxCommits = 12) {
+  const url = `/api/provenance/stream?repo=${encodeURIComponent(repo)}&file_path=${encodeURIComponent(filePath)}&max_commits=${maxCommits}`
+  return new EventSource(url)
+}
+
+export async function getCachedProvenance(repo, filePath) {
+  const { data } = await api.get(`/provenance/cached?repo=${encodeURIComponent(repo)}&file_path=${encodeURIComponent(filePath)}`)
+  return data
+}
+
+// Blast Radius
+export function streamBlastRadius(repo, pr) {
+  const url = `/api/blast/stream?repo=${encodeURIComponent(repo)}&pr=${pr}`
+  return new EventSource(url)
+}
+
+export async function getCommitDiff(repo, sha) {
+  const { data } = await api.get(`/provenance/diff?repo=${encodeURIComponent(repo)}&sha=${encodeURIComponent(sha)}`)
+  return data
+}
+
 export default api

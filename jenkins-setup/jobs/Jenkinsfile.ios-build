@@ -1,0 +1,76 @@
+/**
+ * Aeon Demo — iOS Build Pipeline
+ * Simulates an Xcode build that fails on a Swift Package Manager
+ * resolution error after a dependency version bump.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source": "jenkins", "name": "${env.JOB_NAME}", "status": "${status}",
+            "repo": "acme/ios-app", "branch": "${env.GIT_BRANCH ?: 'feature/new-onboarding'}",
+            "build_number": ${env.BUILD_NUMBER}, "url": "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}", "logs": "${safeLogs}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                contentType: 'APPLICATION_JSON', requestBody: payload,
+                timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) { echo "⚠️  Aeon notification failed: ${e.message}" }
+    }
+}
+
+pipeline {
+    agent { label 'macos' }
+    options { timestamps(); timeout(time: 30, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '20')) }
+
+    environment {
+        SCHEME       = 'AcmeApp'
+        WORKSPACE    = 'AcmeApp.xcworkspace'
+        DESTINATION  = 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.2'
+    }
+
+    stages {
+        stage('Checkout') { steps { echo "📦 Checking out feature/new-onboarding" } }
+        stage('Resolve Swift Packages') {
+            steps {
+                script {
+                    def errorOutput = """
+xcodebuild -resolvePackageDependencies -workspace AcmeApp.xcworkspace -scheme AcmeApp
+
+Resolve Package Graph
+
+Fetching from https://github.com/Alamofire/Alamofire.git
+Fetching from https://github.com/onevcat/Kingfisher.git
+Fetching from https://github.com/firebase/firebase-ios-sdk.git
+
+error: Dependencies could not be resolved because root depends on 'firebase-ios-sdk' 10.20.0..<11.0.0,
+       and 'firebase-ios-sdk' cannot be used because 'firebase-performance' 10.22.0 depends on
+       'firebase-ios-sdk' 10.22.0..<10.23.0, which has no versions satisfying
+       the requirement 10.20.0..<11.0.0 and 10.22.0..<10.23.0 simultaneously.
+
+hint: Pin 'firebase-ios-sdk' to an exact version in Package.resolved to resolve the conflict.
+      Run: xcodebuild -resolvePackageDependencies after updating Package.resolved
+
+Build input files cannot be found: '/DerivedData/AcmeApp/Build/Products/Debug-iphonesimulator/Alamofire.framework'
+"""
+                    echo errorOutput
+                    aeon_notify('failure',
+                        'SPM dependency conflict: firebase-ios-sdk version constraint clash between firebase-performance 10.22.0 and root Package.swift',
+                        errorOutput)
+                    error("Swift Package resolution failed — firebase-ios-sdk version conflict")
+                }
+            }
+        }
+        stage('Build') { steps { echo "🔨 Xcode build skipped — package resolution failed" } }
+        stage('Unit Tests') { steps { echo "🧪 Tests skipped" } }
+        stage('Archive') { steps { echo "📦 Archive skipped" } }
+    }
+    post {
+        success { aeon_notify('success'); echo "✅ iOS build archived successfully" }
+        aborted { aeon_notify('aborted') }
+        always  { echo "iOS build status: ${currentBuild.currentResult}" }
+    }
+}

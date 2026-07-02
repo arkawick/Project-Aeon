@@ -1,0 +1,118 @@
+{
+  "name": "Performance Regression → Alert & Jira Ticket",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-perf-regression",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-08",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-perf-regression"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.status }}", "operation": "equals", "value2": "failure" },
+            { "value1": "={{ $json.name }}", "operation": "contains", "value2": "performance" }
+          ]
+        }
+      },
+      "id": "node-filter-08",
+      "name": "Performance Failures Only",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst summary = data.error_summary || data.logs || '';\nconst p95Match = summary.match(/p95[=:\\s]+([\\d.]+)ms/i);\nconst p95 = p95Match ? parseFloat(p95Match[1]) : null;\nconst threshold = 500;\n\nreturn [{\n  json: {\n    p95_latency: p95,\n    threshold,\n    overage_pct: p95 ? Math.round(((p95 - threshold) / threshold) * 100) : null,\n    pipeline: data.name,\n    branch: data.branch,\n    commit: data.commit_sha,\n    build_url: data.url,\n    summary,\n    jira_summary: `Performance regression: p95=${p95 ? p95+'ms' : 'unknown'} (threshold ${threshold}ms) on ${data.branch}`,\n    jira_description: `A performance regression was detected by Aeon on the ${data.branch} branch.\\n\\n*Pipeline:* ${data.name}\\n*p95 Latency:* ${p95 ? p95+'ms' : 'unknown'} (threshold: ${threshold}ms)\\n*Commit:* ${data.commit_sha || 'unknown'}\\n\\n*Error details:*\\n${summary.substring(0, 1000)}\\n\\n*Build:* ${data.url}`\n  }\n}];"
+      },
+      "id": "node-format-08",
+      "name": "Extract Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://acme.atlassian.net/rest/api/3/issue",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"fields\":{\"project\":{\"key\":\"INFRA\"},\"summary\":\"{{ $json.jira_summary }}\",\"description\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"{{ $json.jira_description }}\"}]}]},\"issuetype\":{\"name\":\"Bug\"},\"priority\":{\"name\":\"High\"},\"labels\":[\"performance\",\"aeon-detected\",\"ci-cd\"]}}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "node-jira-08",
+      "name": "Create Jira Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "text": "=📉 *Performance Regression Detected* — p95={{ $('Extract Metrics').item.json.p95_latency }}ms (threshold: {{ $('Extract Metrics').item.json.threshold }}ms, {{ $('Extract Metrics').item.json.overage_pct }}% over)\nPipeline: `{{ $('Extract Metrics').item.json.pipeline }}` | Branch: `{{ $('Extract Metrics').item.json.branch }}`\nJira: {{ $json.key || 'see Jira' }} | <{{ $('Extract Metrics').item.json.build_url }}|View Build>",
+        "otherOptions": { "channel": "#performance" }
+      },
+      "id": "node-slack-08",
+      "name": "Slack #performance",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1280, 200],
+      "credentials": {
+        "slackApi": { "id": "slack-aeon", "name": "Slack Aeon" }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"regression_alerted\", \"jira_key\": \"{{ $('Create Jira Ticket').item.json.key }}\" }"
+      },
+      "id": "node-respond-08",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"skipped\" }"
+      },
+      "id": "node-skip-08",
+      "name": "Skip",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Performance Failures Only", "type": "main", "index": 0 }]] },
+    "Performance Failures Only": {
+      "main": [
+        [{ "node": "Extract Metrics", "type": "main", "index": 0 }],
+        [{ "node": "Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Metrics": { "main": [[{ "node": "Create Jira Ticket", "type": "main", "index": 0 }]] },
+    "Create Jira Ticket": { "main": [[{ "node": "Slack #performance", "type": "main", "index": 0 }]] },
+    "Slack #performance": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "performance" }, { "name": "jira" }],
+  "notes": "Triggered when Aeon detects a performance pipeline failure. Extracts p95 latency from the error summary, creates a Jira bug in the INFRA project, and posts a Slack alert to #performance with the regression details."
+}

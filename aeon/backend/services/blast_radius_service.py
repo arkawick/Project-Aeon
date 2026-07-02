@@ -1,0 +1,332 @@
+"""
+Blast Radius Analyzer
+=====================
+Given a GitHub PR, maps which files changed → which services, tests, configs,
+and pipelines are impacted → AI risk assessment with deploy recommendation.
+
+Graph schema:
+  (PR)-[:CHANGED]->(File)-[:IMPACTS]->(Service|Test|Config|Pipeline|Infrastructure|Dependencies)
+"""
+
+from __future__ import annotations
+
+import json as _json
+import os
+import re
+from typing import Any, AsyncIterator
+
+import anthropic
+import httpx
+
+GH_API = "https://api.github.com"
+
+NODE_COLORS = {
+    "PR":             "#22c55e",
+    "File":           "#64748b",
+    "Service":        "#f97316",
+    "Test":           "#a855f7",
+    "Config":         "#eab308",
+    "Pipeline":       "#3b82f6",
+    "Infrastructure": "#ec4899",
+    "Dependencies":   "#ef4444",
+    "Docs":           "#94a3b8",
+}
+
+RISK_COLOR = {"HIGH": "#ef4444", "MEDIUM": "#f59e0b", "LOW": "#22c55e", "UNKNOWN": "#64748b"}
+
+
+def _gh_headers() -> dict[str, str]:
+    h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+async def _gh_get(client: httpx.AsyncClient, endpoint: str, **params) -> Any:
+    resp = await client.get(f"{GH_API}{endpoint}", headers=_gh_headers(), params=params, timeout=15.0)
+    if resp.status_code == 404:
+        return None
+    if resp.status_code in (403, 429):
+        has_token = bool(os.getenv("GITHUB_TOKEN", "").strip())
+        reset_ts = resp.headers.get("X-RateLimit-Reset", "")
+        reset_str = ""
+        if reset_ts:
+            import datetime
+            try:
+                reset_str = f" Resets at {datetime.datetime.utcfromtimestamp(int(reset_ts)).strftime('%H:%M UTC')}."
+            except Exception:
+                pass
+        if not has_token:
+            raise RuntimeError(
+                "GitHub rate limit — add GITHUB_TOKEN to aeon/backend/.env and run: docker compose up -d backend." + reset_str
+            )
+        retry_after = resp.headers.get("Retry-After", "")
+        if retry_after:
+            raise RuntimeError(f"GitHub secondary rate limit. Wait {retry_after}s before retrying." + reset_str)
+        raise RuntimeError(f"GitHub rate limit exhausted (authenticated).{reset_str}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _classify_file(filepath: str) -> tuple[str, str]:
+    """Returns (category, risk_level)."""
+    fp = filepath.lower()
+    parts = fp.split("/")
+    filename = parts[-1]
+
+    # Dependency manifests — HIGH
+    dep_names = {
+        "package.json", "requirements.txt", "go.mod", "go.sum",
+        "gemfile", "gemfile.lock", "pom.xml", "build.gradle",
+        "cargo.toml", "cargo.lock", "pyproject.toml", "setup.py",
+        "setup.cfg", "composer.json",
+    }
+    if filename in dep_names or filename.endswith((".lock", "-lock.json")):
+        return ("Dependencies", "HIGH")
+
+    # Infrastructure — HIGH
+    if "dockerfile" in filename or "docker-compose" in filename or filename == ".dockerignore":
+        return ("Infrastructure", "HIGH")
+    if any(p in parts for p in ("k8s", "kubernetes", "helm", "terraform", "infra", "deploy")):
+        return ("Infrastructure", "HIGH")
+
+    # CI / Pipeline — MEDIUM
+    if ".github/workflows" in filepath or "jenkinsfile" in filename or ".circleci" in filepath:
+        return ("Pipeline", "MEDIUM")
+    if any(p in parts for p in ("ci", ".travis")) and filename.endswith((".yml", ".yaml")):
+        return ("Pipeline", "MEDIUM")
+
+    # Config — HIGH
+    if filename in ("config.py", "settings.py", "configuration.js", "config.ts") or \
+       filename.endswith((".env", ".env.example", ".env.sample")):
+        return ("Config", "HIGH")
+    if filename.endswith((".yml", ".yaml", ".toml", ".ini", ".cfg")) and \
+       not any(p in parts for p in ("test", "tests", "__tests__", "spec")):
+        return ("Config", "MEDIUM")
+
+    # Tests — LOW
+    test_dirs = {"test", "tests", "__tests__", "spec", "specs", "testing", "e2e"}
+    if any(p in test_dirs for p in parts):
+        return ("Test", "LOW")
+    test_suffixes = ("_test.py", ".test.js", ".spec.js", ".test.ts", ".spec.ts", "_test.go", "test_.py")
+    if filename.endswith(test_suffixes):
+        return ("Test", "LOW")
+
+    # Docs — LOW
+    if filename.endswith((".md", ".rst", ".txt")) or "docs" in parts or "documentation" in parts:
+        return ("Docs", "LOW")
+
+    # Everything else is Service code — HIGH
+    return ("Service", "HIGH")
+
+
+def _infer_service(filepath: str) -> str:
+    """Infer a human-readable service/module name from the file path."""
+    parts = filepath.split("/")
+    top = parts[0].lower()
+
+    # Monorepo: packages/auth/src/... → auth
+    if top in ("packages", "services", "apps", "modules", "libs") and len(parts) > 1:
+        return parts[1]
+
+    # Standard layout: src/middleware/logger.js → middleware
+    if top in ("src", "lib", "app", "api", "backend", "frontend") and len(parts) > 2:
+        return parts[1]
+
+    # Fallback: top directory or filename stem
+    if len(parts) > 1:
+        return parts[0]
+    return parts[-1].rsplit(".", 1)[0]
+
+
+def _node(nid: str, ntype: str, label: str, **extra) -> dict[str, Any]:
+    return {"id": nid, "type": ntype, "label": label, "color": NODE_COLORS.get(ntype, "#64748b"), **extra}
+
+
+def _edge(source: str, target: str, rel: str) -> dict[str, Any]:
+    return {"source": source, "target": target, "type": rel}
+
+
+async def _ai_risk(
+    repo: str,
+    pr_title: str,
+    pr_body: str,
+    changed_files: list[tuple],
+    impact_counts: dict[str, int],
+) -> dict[str, Any]:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"risk_level": "UNKNOWN", "narrative": "Add ANTHROPIC_API_KEY to .env for AI risk assessment.", "deploy_recommendation": "", "must_test": []}
+
+    file_lines = "\n".join(
+        f"  [{cat}/{risk}] {fp}  +{add}/-{rem}"
+        for fp, cat, risk, add, rem in changed_files[:20]
+    )
+    impact_str = ", ".join(f"{k}: {v}" for k, v in impact_counts.items())
+
+    prompt = f"""You are a senior DevOps engineer reviewing a pull request for production deployment risk.
+
+Repository: {repo}
+PR Title: {pr_title}
+PR Description: {(pr_body or "")[:500]}
+
+Changed files:
+{file_lines}
+
+Impact summary: {impact_str}
+
+Respond ONLY with a JSON object in this exact format (no markdown, no explanation):
+{{
+  "risk_level": "HIGH" or "MEDIUM" or "LOW",
+  "narrative": "2-3 sentences: what is risky and why",
+  "deploy_recommendation": "one clear sentence: safe / deploy with caution / do not deploy",
+  "must_test": ["specific thing to verify", "another thing"]
+}}
+
+Be specific — reference actual filenames and inferred service names."""
+
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    msg = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=350,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = msg.content[0].text.strip()
+    try:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            return _json.loads(m.group())
+    except Exception:
+        pass
+    return {"risk_level": "MEDIUM", "narrative": text, "deploy_recommendation": "", "must_test": []}
+
+
+async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[str, Any]]:
+    owner_repo = repo.strip("/").replace("https://github.com/", "")
+    parts = owner_repo.split("/")
+    if len(parts) < 2:
+        yield {"type": "error", "message": f"Invalid repo '{repo}'. Use owner/repo format."}
+        return
+
+    owner, repo_name = parts[0], parts[1]
+    nodes: dict[str, dict] = {}
+    edges: list[dict] = []
+
+    async with httpx.AsyncClient() as client:
+        # ── PR metadata ───────────────────────────────────────────────
+        yield {"type": "step", "message": f"Fetching PR #{pr_number} from {owner}/{repo_name}…"}
+        pr = await _gh_get(client, f"/repos/{owner}/{repo_name}/pulls/{pr_number}")
+        if not pr:
+            # Check if this number exists as an issue (common mistake)
+            issue = await _gh_get(client, f"/repos/{owner}/{repo_name}/issues/{pr_number}")
+            if issue and "pull_request" not in issue:
+                yield {"type": "error", "message": f"#{pr_number} is an Issue, not a Pull Request. Go to github.com/{owner}/{repo_name}/pulls and pick a PR number."}
+            elif issue and "pull_request" in issue:
+                yield {"type": "error", "message": f"#{pr_number} exists but the GitHub API returned no data. It may be a draft or very old PR. Try another PR number."}
+            else:
+                yield {"type": "error", "message": f"PR #{pr_number} not found in {owner}/{repo_name}. Check the number in the repo's Pull Requests tab."}
+            return
+
+        pr_id = f"pr:{pr_number}"
+        nodes[pr_id] = _node(
+            pr_id, "PR", f"PR #{pr_number}",
+            title=pr.get("title", ""),
+            url=pr.get("html_url", ""),
+            state=pr.get("state", "open"),
+            author=(pr.get("user") or {}).get("login", ""),
+            additions=pr.get("additions", 0),
+            deletions=pr.get("deletions", 0),
+            changed_files=pr.get("changed_files", 0),
+            base_branch=pr.get("base", {}).get("ref", ""),
+            head_branch=pr.get("head", {}).get("ref", ""),
+        )
+
+        # ── Changed files ─────────────────────────────────────────────
+        total = pr.get("changed_files", "?")
+        yield {"type": "step", "message": f"Analyzing {total} changed files…"}
+        files_data = await _gh_get(
+            client, f"/repos/{owner}/{repo_name}/pulls/{pr_number}/files",
+            per_page=100,
+        )
+        if not files_data:
+            yield {"type": "error", "message": "Could not fetch PR files."}
+            return
+
+    # ── Build graph ───────────────────────────────────────────────────
+    yield {"type": "step", "message": "Mapping impact across services, tests, and infrastructure…"}
+
+    changed_files: list[tuple] = []
+    impact_counts: dict[str, int] = {}
+    seen_impacts: set[str] = set()
+
+    for f in files_data[:30]:
+        fp        = f.get("filename", "")
+        additions = f.get("additions", 0)
+        deletions = f.get("deletions", 0)
+        status    = f.get("status", "modified")
+
+        category, risk = _classify_file(fp)
+        changed_files.append((fp, category, risk, additions, deletions))
+        impact_counts[category] = impact_counts.get(category, 0) + 1
+
+        # File node
+        file_id = f"file:{fp}"
+        nodes[file_id] = _node(
+            file_id, "File", fp.split("/")[-1],
+            full_path=fp,
+            category=category,
+            risk=risk,
+            additions=additions,
+            deletions=deletions,
+            status=status,
+        )
+        edges.append(_edge(pr_id, file_id, "CHANGED"))
+
+        # Impact node
+        if category == "Service":
+            svc = _infer_service(fp)
+            impact_id = f"service:{svc}"
+            if impact_id not in seen_impacts:
+                seen_impacts.add(impact_id)
+                nodes[impact_id] = _node(impact_id, "Service", svc, risk=risk, file_count=0)
+            nodes[impact_id]["file_count"] = nodes[impact_id].get("file_count", 0) + 1
+        else:
+            impact_id = f"impact:{category}"
+            if impact_id not in seen_impacts:
+                seen_impacts.add(impact_id)
+                nodes[impact_id] = _node(impact_id, category, category, risk=risk, file_count=0)
+            nodes[impact_id]["file_count"] = nodes[impact_id].get("file_count", 0) + 1
+
+        edges.append(_edge(file_id, impact_id, "IMPACTS"))
+
+    # ── AI risk assessment ────────────────────────────────────────────
+    yield {"type": "step", "message": "Generating AI risk assessment…"}
+    risk_result = await _ai_risk(
+        repo=f"{owner}/{repo_name}",
+        pr_title=pr.get("title", ""),
+        pr_body=pr.get("body", ""),
+        changed_files=changed_files,
+        impact_counts=impact_counts,
+    )
+    yield {"type": "risk", **risk_result}
+
+    # ── Result ────────────────────────────────────────────────────────
+    yield {
+        "type":  "result",
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "meta":  {
+            "repo":         f"{owner}/{repo_name}",
+            "pr":           pr_number,
+            "pr_title":     pr.get("title", ""),
+            "pr_url":       pr.get("html_url", ""),
+            "author":       (pr.get("user") or {}).get("login", ""),
+            "state":        pr.get("state", ""),
+            "total_files":  pr.get("changed_files", 0),
+            "additions":    pr.get("additions", 0),
+            "deletions":    pr.get("deletions", 0),
+            "impacts":      impact_counts,
+            "risk_level":   risk_result.get("risk_level", "UNKNOWN"),
+        },
+    }

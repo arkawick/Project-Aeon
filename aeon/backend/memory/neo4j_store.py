@@ -224,6 +224,90 @@ class Neo4jStore:
             print(f"[Neo4jStore] get_top_errors error: {exc}")
             return []
 
+    # ------------------------------------------------------------------
+    # Provenance graph
+    # ------------------------------------------------------------------
+
+    def _sync_store_provenance_graph(
+        self, repo: str, file_path: str, nodes: list[dict], edges: list[dict]
+    ) -> bool:
+        with self.driver.session() as session:
+            for n in nodes:
+                props = {k: v for k, v in n.items() if k not in ("color",)}
+                session.run(
+                    """
+                    MERGE (n:ProvenanceNode {id: $id})
+                    SET n += $props, n.repo = $repo, n.file_path = $file_path
+                    """,
+                    id=n["id"], props=props, repo=repo, file_path=file_path,
+                )
+            for e in edges:
+                session.run(
+                    f"""
+                    MATCH (a:ProvenanceNode {{id: $source}})
+                    MATCH (b:ProvenanceNode {{id: $target}})
+                    MERGE (a)-[r:{e['type']}]->(b)
+                    """,
+                    source=e["source"], target=e["target"],
+                )
+        return True
+
+    def _sync_get_provenance_graph(self, repo: str, file_path: str) -> dict:
+        nodes_raw = self._run_query(
+            """
+            MATCH (n:ProvenanceNode {repo: $repo, file_path: $file_path})
+            RETURN n
+            """,
+            repo=repo, file_path=file_path,
+        )
+        if not nodes_raw:
+            return {"nodes": [], "edges": [], "cached": False}
+
+        node_ids = {row["n"]["id"] for row in nodes_raw}
+        edges_raw = self._run_query(
+            """
+            MATCH (a:ProvenanceNode {repo: $repo})-[r]->(b:ProvenanceNode {repo: $repo})
+            WHERE a.file_path = $file_path
+            RETURN a.id AS source, type(r) AS type, b.id AS target
+            """,
+            repo=repo, file_path=file_path,
+        )
+
+        NODE_COLORS = {
+            "File": "#9cdef2", "Commit": "#64748b", "PullRequest": "#22c55e",
+            "Issue": "#f59e0b", "Developer": "#a855f7",
+        }
+        nodes = []
+        for row in nodes_raw:
+            n = dict(row["n"])
+            n["color"] = NODE_COLORS.get(n.get("type", ""), "#64748b")
+            nodes.append(n)
+
+        edges = [{"source": r["source"], "target": r["target"], "type": r["type"]} for r in edges_raw]
+        return {"nodes": nodes, "edges": edges, "cached": True}
+
+    async def store_provenance_graph(
+        self, repo: str, file_path: str, nodes: list[dict], edges: list[dict]
+    ) -> bool:
+        if self.driver is None:
+            return False
+        try:
+            return await asyncio.to_thread(
+                self._sync_store_provenance_graph, repo, file_path, nodes, edges
+            )
+        except Exception as exc:
+            print(f"[Neo4jStore] store_provenance_graph error: {exc}")
+            return False
+
+    async def get_provenance_graph(self, repo: str, file_path: str) -> dict:
+        if self.driver is None:
+            return {"nodes": [], "edges": [], "cached": False}
+        try:
+            return await asyncio.to_thread(self._sync_get_provenance_graph, repo, file_path)
+        except Exception as exc:
+            print(f"[Neo4jStore] get_provenance_graph error: {exc}")
+            return {"nodes": [], "edges": [], "cached": False}
+
     def __del__(self):
         if self.driver:
             try:

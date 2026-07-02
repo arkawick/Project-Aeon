@@ -1,0 +1,104 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-quality:
+    name: Python — Lint & Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install tools
+        run: pip install ruff mypy pylint coverage pytest
+
+      - name: Ruff lint
+        run: ruff check aeon/backend/
+
+      - name: Mypy type check
+        run: mypy aeon/backend/ --ignore-missing-imports
+
+      - name: Run tests with coverage
+        run: |
+          cd aeon/backend
+          coverage run -m pytest tests/ -v
+          coverage report --fail-under=70
+          coverage xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: aeon/backend/coverage.xml
+          fail_ci_if_error: false
+
+  js-quality:
+    name: JavaScript — Lint & Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: aeon/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd aeon/frontend && npm ci
+
+      - name: ESLint
+        run: cd aeon/frontend && npm run lint
+
+      - name: Prettier check
+        run: cd aeon/frontend && npx prettier --check "src/**/*.{js,jsx,ts,tsx,css}"
+
+      - name: TypeScript check
+        run: cd aeon/frontend && npx tsc --noEmit || true
+
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"failure\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"Code quality checks failed — lint, type, or coverage threshold\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"success\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"

@@ -1,0 +1,101 @@
+{
+  "name": "Critical Failure → PagerDuty Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-pagerduty",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-04",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-pagerduty"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.status }}", "operation": "equals", "value2": "failure" }
+          ],
+          "number": [
+            { "value1": "={{ $json.confidence }}", "operation": "largerEqual", "value2": 85 }
+          ]
+        }
+      },
+      "id": "node-filter-04",
+      "name": "Only High-Confidence Failures",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst summary = data.error_summary || data.root_cause || 'CI/CD pipeline failure detected by Aeon';\nreturn [{\n  json: {\n    routing_key: '{{ $credentials.pagerdutyIntegrationKey }}',\n    event_action: 'trigger',\n    dedup_key: `aeon-${data.pipeline || data.name}-${data.branch}`,\n    payload: {\n      summary: `[Aeon] ${data.pipeline || data.name} FAILED on ${data.branch}: ${summary.substring(0, 200)}`,\n      severity: data.confidence >= 90 ? 'critical' : 'error',\n      source: data.source || 'aeon',\n      component: data.pipeline || data.name,\n      group: 'ci-cd',\n      class: 'build_failure',\n      custom_details: {\n        branch: data.branch,\n        confidence: `${data.confidence}%`,\n        build_url: data.url,\n        root_cause: summary,\n        aeon_dashboard: 'http://localhost:3000/incidents'\n      }\n    },\n    links: [\n      { href: data.url || '', text: 'View Build' },\n      { href: 'http://localhost:3000/incidents', text: 'View in Aeon' }\n    ]\n  }\n}];"
+      },
+      "id": "node-format-04",
+      "name": "Format PagerDuty Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://events.pagerduty.com/v2/enqueue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-pd-04",
+      "name": "Send to PagerDuty",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"pagerduty_alerted\", \"dedup_key\": \"{{ $json.dedup_key }}\" }"
+      },
+      "id": "node-respond-04",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1280, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"skipped\", \"reason\": \"below confidence threshold or not a failure\" }"
+      },
+      "id": "node-skip-04",
+      "name": "Skip",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Only High-Confidence Failures", "type": "main", "index": 0 }]] },
+    "Only High-Confidence Failures": {
+      "main": [
+        [{ "node": "Format PagerDuty Event", "type": "main", "index": 0 }],
+        [{ "node": "Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format PagerDuty Event": { "main": [[{ "node": "Send to PagerDuty", "type": "main", "index": 0 }]] },
+    "Send to PagerDuty": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "pagerduty" }, { "name": "alerting" }],
+  "notes": "Triggered by Aeon when confidence >= 85% on a failure event. Sends a PagerDuty v2 alert with root-cause summary, severity based on confidence score, and links back to Aeon and the build."
+}

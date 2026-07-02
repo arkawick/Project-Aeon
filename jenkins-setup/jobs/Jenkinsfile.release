@@ -1,0 +1,97 @@
+/**
+ * Aeon Demo — Release Pipeline
+ * Builds, versions, tags, and publishes a production release.
+ * Succeeds to demonstrate a green run in the Aeon dashboard.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source": "jenkins", "name": "${env.JOB_NAME}", "status": "${status}",
+            "repo": "acme/backend-api", "branch": "release/v2.4.1",
+            "build_number": ${env.BUILD_NUMBER}, "url": "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}", "logs": "${safeLogs}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                contentType: 'APPLICATION_JSON', requestBody: payload,
+                timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) { echo "⚠️  Aeon notification failed: ${e.message}" }
+    }
+}
+
+pipeline {
+    agent any
+    options { timestamps(); timeout(time: 20, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '10')) }
+
+    parameters {
+        string(name: 'VERSION', defaultValue: '2.4.1', description: 'Release version (semver)')
+        booleanParam(name: 'PUSH_TO_REGISTRY', defaultValue: true, description: 'Push image to container registry')
+        booleanParam(name: 'TAG_GIT', defaultValue: true, description: 'Create and push git tag')
+    }
+
+    stages {
+        stage('Checkout') { steps { echo "📦 Checking out release/v${params.VERSION}" } }
+        stage('Validate Version') {
+            steps {
+                echo "🔖 Version: v${params.VERSION}"
+                echo "✓ Version follows semver"
+                echo "✓ CHANGELOG.md has entry for v${params.VERSION}"
+                echo "✓ No uncommitted changes on release branch"
+            }
+        }
+        stage('Run All Tests') {
+            steps {
+                echo "🧪 Running full test suite before release..."
+                echo "  Unit tests:        247/247 passed ✓"
+                echo "  Integration tests:  43/43 passed ✓"
+                echo "  Contract tests:     12/12 passed ✓"
+            }
+        }
+        stage('Build Release Image') {
+            steps {
+                echo "🏗️  Building Docker image acme/backend-api:v${params.VERSION}..."
+                echo "Step 1/12 — FROM python:3.12-slim"
+                echo "Step 8/12 — COPY . /app"
+                echo "Step 12/12 — CMD [\"uvicorn\", \"main:app\"]"
+                echo "Successfully built d7a3f91b2c01"
+                echo "Successfully tagged acme/backend-api:v${params.VERSION}"
+                echo "Successfully tagged acme/backend-api:latest"
+            }
+        }
+        stage('Push to Registry') {
+            when { expression { params.PUSH_TO_REGISTRY } }
+            steps {
+                echo "📤 Pushing acme/backend-api:v${params.VERSION} to registry.acme.internal..."
+                echo "The push refers to repository [registry.acme.internal/acme/backend-api]"
+                echo "v${params.VERSION}: digest: sha256:a3f1c9... size: 1847"
+                echo "latest: digest: sha256:a3f1c9... size: 1847"
+            }
+        }
+        stage('Tag Release') {
+            when { expression { params.TAG_GIT } }
+            steps {
+                echo "🏷️  Creating git tag v${params.VERSION}..."
+                echo "✓ Tag v${params.VERSION} created and pushed to origin"
+            }
+        }
+        stage('Publish Release Notes') {
+            steps {
+                echo "📝 Creating GitHub release v${params.VERSION}..."
+                echo "✓ Release https://github.com/acme/backend-api/releases/tag/v${params.VERSION} published"
+            }
+        }
+    }
+    post {
+        success {
+            aeon_notify('success')
+            echo "🎉 Release v${params.VERSION} published successfully"
+        }
+        failure {
+            aeon_notify('failure', "Release v${params.VERSION} failed — see build log", '')
+        }
+        aborted { aeon_notify('aborted') }
+    }
+}

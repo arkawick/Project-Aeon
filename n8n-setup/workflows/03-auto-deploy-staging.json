@@ -1,0 +1,107 @@
+{
+  "name": "Successful Build → Auto-Deploy to Staging",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aeon-deploy-staging",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "node-webhook-03",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "aeon-deploy-staging"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.status }}", "operation": "equals", "value2": "success" },
+            { "value1": "={{ $json.branch }}", "operation": "equals", "value2": "main" }
+          ]
+        }
+      },
+      "id": "node-filter-03",
+      "name": "Only Successful Main Builds",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nreturn [{\n  json: {\n    deploy_id: `deploy-${Date.now()}`,\n    pipeline: data.pipeline || data.name,\n    branch: data.branch,\n    commit: data.commit_sha || 'unknown',\n    environment: 'staging',\n    triggered_by: 'aeon-automation',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-prep-03",
+      "name": "Prepare Deploy Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://deploy.acme.internal/api/deploys",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $credentials.deployApiToken }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "environment", "value": "staging" },
+            { "name": "commit_sha", "value": "={{ $json.commit }}" },
+            { "name": "deploy_id", "value": "={{ $json.deploy_id }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "node-deploy-03",
+      "name": "Trigger Staging Deploy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"deploy_triggered\", \"environment\": \"staging\", \"deploy_id\": \"{{ $json.deploy_id }}\" }"
+      },
+      "id": "node-respond-03",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1280, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"skipped\", \"reason\": \"not a successful main build\" }"
+      },
+      "id": "node-skip-03",
+      "name": "Skip",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Only Successful Main Builds", "type": "main", "index": 0 }]] },
+    "Only Successful Main Builds": {
+      "main": [
+        [{ "node": "Prepare Deploy Payload", "type": "main", "index": 0 }],
+        [{ "node": "Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Deploy Payload": { "main": [[{ "node": "Trigger Staging Deploy", "type": "main", "index": 0 }]] },
+    "Trigger Staging Deploy": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": [{ "name": "aeon-demo" }, { "name": "deploy" }],
+  "notes": "Triggered by Aeon when a build on 'main' succeeds. Calls the deploy API to promote the new image to the staging environment automatically."
+}

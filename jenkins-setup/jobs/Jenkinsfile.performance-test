@@ -1,0 +1,106 @@
+/**
+ * Aeon Demo — Performance Test Pipeline
+ * Runs k6 load tests against staging. Fails when p95 latency
+ * exceeds the 500ms SLA threshold after a recent DB schema change.
+ */
+
+def aeon_notify(String status, String errorSummary = '', String logs = '') {
+    withCredentials([string(credentialsId: 'AEON_URL', variable: 'AEON')]) {
+        def safeSummary = errorSummary.replace('"', '\\"').replace('\n', '\\n')
+        def safeLogs    = logs.take(4000).replace('"', '\\"').replace('\n', '\\n')
+        def payload = """{
+            "source": "jenkins", "name": "${env.JOB_NAME}", "status": "${status}",
+            "repo": "acme/backend-api", "branch": "${env.GIT_BRANCH ?: 'main'}",
+            "build_number": ${env.BUILD_NUMBER}, "url": "${env.BUILD_URL}",
+            "error_summary": "${safeSummary}", "logs": "${safeLogs}"
+        }"""
+        try {
+            httpRequest(url: "${AEON}/api/pipelines/ingest", httpMode: 'POST',
+                contentType: 'APPLICATION_JSON', requestBody: payload,
+                timeout: 10, validResponseCodes: '100:299')
+        } catch (Exception e) { echo "⚠️  Aeon notification failed: ${e.message}" }
+    }
+}
+
+pipeline {
+    agent any
+    options { timestamps(); timeout(time: 30, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '10')) }
+
+    environment {
+        TARGET_URL   = 'https://staging.acme.internal'
+        VUS          = '50'
+        DURATION     = '5m'
+        P95_THRESHOLD = '500'
+    }
+
+    stages {
+        stage('Checkout') { steps { echo "📦 Checking out performance test scripts" } }
+        stage('Warm-up') {
+            steps {
+                echo "🔥 Warming up staging environment (10 VUs, 30s)..."
+                echo "✓ All endpoints responding — avg 89ms"
+            }
+        }
+        stage('Load Test — API') {
+            steps {
+                script {
+                    def errorOutput = """
+          /\\      |‾‾| /‾‾/   /‾‾/
+     /\\  /  \\     |  |/  /   /  /
+    /  \\/    \\    |     (   /   ‾‾\\
+   /          \\   |  |\\  \\ |  (‾)  |
+  / __________ \\  |__| \\__\\ \\_____/ .io
+
+  execution: local
+     script: tests/load/api-endpoints.js
+     output: -
+
+  scenarios: (100.00%) 1 scenario, 50 max VUs, 5m30s max duration
+           * default: 50 looping VUs for 5m0s (gracefulStop: 30s)
+
+
+running (5m00.3s), 00/50 VUs, 14832 complete and 0 interrupted iterations
+default ✓ [==============================] 50 VUs  5m0s
+
+     ✗ status 200
+      ↳  98% — ✓ 14535 / ✗ 297
+
+     checks.........................: 97.99% ✓ 14535 ✗ 297
+     data_received..................: 156 MB 519 kB/s
+     data_sent......................: 18 MB  59 kB/s
+     http_req_blocked...............: avg=2.1ms   min=1µs    med=3µs    max=212ms  p(90)=6µs    p(95)=8µs
+     http_req_connecting............: avg=1.9ms   min=0s     med=0s     max=211ms  p(90)=0s     p(95)=0s
+   ✗ http_req_duration..............: avg=387ms   min=12ms   med=341ms  max=4.21s  p(90)=612ms  p(95)=847ms
+       { expected_response:true }...: avg=389ms   min=12ms   med=342ms  max=4.21s  p(90)=614ms  p(95)=849ms
+     http_req_failed................: 2.00%  ✓ 297    ✗ 14535
+     http_req_receiving.............: avg=3.2ms   min=23µs   med=1.1ms  max=312ms  p(90)=7.8ms  p(95)=12ms
+     http_req_sending...............: avg=198µs   min=8µs    med=61µs   max=42ms   p(90)=283µs  p(95)=781µs
+     http_req_tls_handshaking.......: avg=0s      min=0s     med=0s     max=0s     p(90)=0s     p(95)=0s
+     http_req_waiting...............: avg=383ms   min=11ms   med=337ms  max=4.19s  p(90)=608ms  p(95)=842ms
+     http_reqs......................: 14832  49.1/s
+     iteration_duration.............: avg=1.02s   min=213ms  med=891ms  max=5.31s  p(90)=1.68s  p(95)=1.92s
+     iterations.....................: 14832  49.1/s
+     vus............................: 50     min=50  max=50
+     vus_max........................: 50     min=50  max=50
+
+FAIL — threshold exceeded: http_req_duration p(95)<500ms — got 847ms
+     Likely cause: missing index on incidents.created_at after schema migration 0041
+"""
+                    echo errorOutput
+                    aeon_notify('failure',
+                        'p95 latency 847ms exceeds 500ms SLA — missing DB index on incidents.created_at (migration 0041)',
+                        errorOutput)
+                    error("Performance threshold exceeded: p95=847ms (limit: 500ms)")
+                }
+            }
+        }
+        stage('Stress Test') {
+            steps { echo "⚡ Stress test skipped — load test threshold not met" }
+        }
+    }
+    post {
+        success { aeon_notify('success'); echo "✅ All performance thresholds met" }
+        aborted { aeon_notify('aborted') }
+        always  { echo "Performance test status: ${currentBuild.currentResult}" }
+    }
+}

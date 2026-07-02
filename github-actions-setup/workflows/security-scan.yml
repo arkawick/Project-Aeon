@@ -1,0 +1,94 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 2 * * 1'   # every Monday at 02:00 UTC
+
+jobs:
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Audit Python dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r aeon/backend/requirements.txt --format json -o audit-report.json || true
+          pip-audit -r aeon/backend/requirements.txt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Audit npm dependencies
+        run: |
+          cd aeon/frontend
+          npm audit --audit-level=high
+
+      # ── Notify Aeon on failure ─────────────────────────────────────────────
+      - name: Notify Aeon (failure)
+        if: failure()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"failure\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"error_summary\": \"Security vulnerabilities found — check audit report\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"
+
+      - name: Notify Aeon (success)
+        if: success()
+        env:
+          AEON_URL: ${{ secrets.AEON_URL }}
+        run: |
+          curl -sf -X POST "${AEON_URL}/api/pipelines/ingest" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d "{
+              \"source\": \"github\", \"name\": \"${{ github.workflow }}\",
+              \"status\": \"success\", \"repo\": \"${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\", \"run_id\": \"${{ github.run_id }}\",
+              \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }" || echo "Aeon notification failed (non-critical)"
