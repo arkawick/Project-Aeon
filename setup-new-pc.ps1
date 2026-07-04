@@ -182,6 +182,22 @@ foreach ($attempt in 1..5) {
 }
 if (-not $seeded) { Write-Warn2 "Could not seed memory. Re-run later: Invoke-RestMethod -Uri http://localhost:8000/api/memory/seed -Method Post" }
 
+# On a first boot with fresh volumes, Neo4j's bolt port often comes up after
+# the backend has already connected (and given up). The backend's Neo4j client
+# is a startup singleton, so a restart is needed to pick the connection up.
+if ($seeded -and $resp.neo4j_stored -eq 0) {
+    Write-Warn2 "Neo4j was not ready when the backend started - restarting backend and re-seeding"
+    Push-Location $AeonDir
+    try { $null = Invoke-Native "docker compose restart backend" } finally { Pop-Location }
+    $null = Wait-ForUrl "http://localhost:8000/health" "Backend (after restart)" 120
+    try {
+        $resp = Invoke-RestMethod -Uri "http://localhost:8000/api/memory/seed" -Method Post -TimeoutSec 30
+        Write-Ok "Re-seeded (chroma=$($resp.chromadb_stored), neo4j=$($resp.neo4j_stored))"
+    } catch {
+        Write-Warn2 "Re-seed failed - run manually: Invoke-RestMethod -Uri http://localhost:8000/api/memory/seed -Method Post"
+    }
+}
+
 # -- 6. Verify Jenkins demo jobs ---------------------------------------------
 
 Write-Step "Verifying Jenkins demo jobs"
