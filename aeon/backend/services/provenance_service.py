@@ -22,9 +22,11 @@ import httpx
 import anthropic
 
 
-GH_API = "https://api.github.com"
-_ISSUE_RE = re.compile(r"(?:closes?|fixes?|resolves?|refs?|references?)\s*#(\d+)", re.IGNORECASE)
-_NUM_RE   = re.compile(r"#(\d+)")
+GH_API     = "https://api.github.com"
+GH_GRAPHQL = "https://api.github.com/graphql"
+_ISSUE_RE  = re.compile(r"(?:closes?|fixes?|resolves?|refs?|references?)\s*#(\d+)", re.IGNORECASE)
+_CLOSES_RE = re.compile(r"(?:closes?|fixes?|resolves?)\s*#(\d+)", re.IGNORECASE)
+_NUM_RE    = re.compile(r"#(\d+)")
 
 NODE_COLORS = {
     "File":        "#9cdef2",   # aeon cyan
@@ -220,6 +222,158 @@ async def fetch_commit_diff(repo: str, sha: str) -> dict:
     }
 
 
+_HISTORY_QUERY = """
+query($owner: String!, $name: String!, $path: String!, $n: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target {
+        ... on Commit {
+          history(first: $n, path: $path) {
+            nodes {
+              oid
+              message
+              committedDate
+              author { name user { login avatarUrl } }
+              associatedPullRequests(first: 2) {
+                nodes {
+                  number title body url state
+                  author { login }
+                  closingIssuesReferences(first: 4) {
+                    nodes { number title body url state }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+async def _fetch_history_graphql(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo_name: str,
+    file_path: str,
+    max_commits: int,
+) -> list[dict[str, Any]] | None:
+    """
+    Fast path: ONE GraphQL request fetches commits + associated PRs + closing
+    issues, replacing ~1 + N + N*4 REST calls. Requires GITHUB_TOKEN.
+    Returns normalized commits, [] if the file has no history, None if the
+    repo doesn't exist / isn't accessible.
+    """
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    resp = await client.post(
+        GH_GRAPHQL,
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "query": _HISTORY_QUERY,
+            "variables": {"owner": owner, "name": repo_name, "path": file_path, "n": max_commits},
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("errors"):
+        raise RuntimeError(payload["errors"][0].get("message", "GraphQL error"))
+
+    repo_data = (payload.get("data") or {}).get("repository")
+    if not repo_data or not repo_data.get("defaultBranchRef"):
+        return None
+
+    commits: list[dict[str, Any]] = []
+    for c in repo_data["defaultBranchRef"]["target"]["history"]["nodes"]:
+        author = c.get("author") or {}
+        user = author.get("user") or {}
+        prs = []
+        for pr in (c.get("associatedPullRequests") or {}).get("nodes") or []:
+            closing = (pr.get("closingIssuesReferences") or {}).get("nodes") or []
+            prs.append({
+                "number": pr["number"],
+                "title":  pr.get("title", ""),
+                "body":   pr.get("body") or "",
+                "url":    pr.get("url", ""),
+                "state":  (pr.get("state") or "").lower(),
+                "user":   (pr.get("author") or {}).get("login", ""),
+                "closing_issues": [
+                    {
+                        "number": i["number"],
+                        "title":  i.get("title", ""),
+                        "body":   i.get("body") or "",
+                        "url":    i.get("url", ""),
+                        "state":  (i.get("state") or "").lower(),
+                    }
+                    for i in closing
+                ],
+            })
+        commits.append({
+            "sha":          c["oid"],
+            "message":      c.get("message", ""),
+            "date":         (c.get("committedDate") or "")[:10],
+            "author_login": user.get("login") or author.get("name") or "unknown",
+            "avatar_url":   user.get("avatarUrl", ""),
+            "prs":          prs,
+        })
+    return commits
+
+
+async def _fetch_history_rest(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo_name: str,
+    file_path: str,
+    max_commits: int,
+) -> list[dict[str, Any]] | None:
+    """
+    Fallback path (no token / GraphQL failed): commit list in one call, then
+    all per-commit PR lookups in parallel instead of serially.
+    """
+    commits_data = await _gh_get(
+        client, f"/repos/{owner}/{repo_name}/commits",
+        path=file_path, per_page=max_commits,
+    )
+    if not commits_data:
+        return None
+
+    sem = asyncio.Semaphore(8)
+
+    async def _prs_for(sha: str) -> list[dict]:
+        async with sem:
+            try:
+                return await _gh_get(client, f"/repos/{owner}/{repo_name}/commits/{sha}/pulls") or []
+            except Exception:
+                return []
+
+    prs_lists = await asyncio.gather(*[_prs_for(c["sha"]) for c in commits_data])
+
+    commits: list[dict[str, Any]] = []
+    for c, prs_raw in zip(commits_data, prs_lists):
+        commits.append({
+            "sha":          c["sha"],
+            "message":      c["commit"]["message"],
+            "date":         c["commit"]["author"]["date"][:10],
+            "author_login": (c.get("author") or {}).get("login") or c["commit"]["author"]["name"],
+            "avatar_url":   (c.get("author") or {}).get("avatar_url", ""),
+            "prs": [
+                {
+                    "number": p["number"],
+                    "title":  p.get("title", ""),
+                    "body":   p.get("body") or "",
+                    "url":    p.get("html_url", ""),
+                    "state":  p.get("state", ""),
+                    "user":   (p.get("user") or {}).get("login", ""),
+                    "closing_issues": [],
+                }
+                for p in prs_raw
+            ],
+        })
+    return commits
+
+
 async def build_provenance_graph(
     repo: str,
     file_path: str,
@@ -256,59 +410,71 @@ async def build_provenance_graph(
         why="This is the file whose change history is being traced.",
     )
 
-    async with httpx.AsyncClient() as client:
-        # ── 1. Commit history ─────────────────────────────────────────
-        yield {"type": "step", "message": f"Fetching commit history for `{file_path}`…"}
-        commits_data = await _gh_get(
-            client, f"/repos/{owner}/{repo_name}/commits",
-            path=file_path, per_page=max_commits,   # 'path' here is a GitHub query param, not the function arg
+    def _add_issue_node(pr_id: str, issue: dict, rel: str):
+        issue_id = f"issue:{issue['number']}"
+        nodes[issue_id] = _node(
+            issue_id, "Issue", f"#{issue['number']}",
+            number=issue["number"],
+            title=issue.get("title", ""),
+            url=issue.get("url", ""),
+            state=issue.get("state", ""),
         )
-        if not commits_data:
+        edges.append(_edge(pr_id, issue_id, rel))
+        ai_items.append({
+            "id": issue_id, "type": "Issue",
+            "raw": f"Issue #{issue['number']}: {issue.get('title','')}. {(issue.get('body') or '')[:400]}",
+        })
+
+    async with httpx.AsyncClient() as client:
+        # ── 1. Commit history + linked PRs (GraphQL fast path) ────────
+        has_token = bool(os.getenv("GITHUB_TOKEN", "").strip())
+        commits = None
+        if has_token:
+            yield {"type": "step", "message": f"Fetching history for `{file_path}` via GraphQL (single request)…"}
+            try:
+                commits = await _fetch_history_graphql(client, owner, repo_name, file_path, max_commits)
+            except Exception as exc:
+                yield {"type": "step", "message": f"GraphQL unavailable ({exc}) — falling back to parallel REST…"}
+                commits = await _fetch_history_rest(client, owner, repo_name, file_path, max_commits)
+        else:
+            yield {"type": "step", "message": f"Fetching history for `{file_path}` via parallel REST (add GITHUB_TOKEN for the 1-request GraphQL fast path)…"}
+            commits = await _fetch_history_rest(client, owner, repo_name, file_path, max_commits)
+
+        if not commits:
             yield {"type": "error", "message": "File not found or repo is private / doesn't exist."}
             return
 
-        yield {"type": "step", "message": f"Found {len(commits_data)} commits. Fetching linked PRs and issues…"}
+        yield {"type": "step", "message": f"Found {len(commits)} commits with linked PRs. Building graph…"}
 
-        for c in commits_data:
-            sha   = c["sha"]
-            short = sha[:7]
-            msg   = c["commit"]["message"].split("\n")[0]
-            author_login = (c.get("author") or {}).get("login", c["commit"]["author"]["name"])
-            date  = c["commit"]["author"]["date"][:10]
+        # ── 2. Build graph from normalized history ────────────────────
+        # (pr_id, issue_number, rel) still needing a REST lookup
+        pending_issue_refs: list[tuple[str, int, str]] = []
 
+        for c in commits:
+            short = c["sha"][:7]
             commit_id = f"commit:{short}"
             nodes[commit_id] = _node(
                 commit_id, "Commit", short,
-                sha=sha, message=msg, author=author_login, date=date,
+                sha=c["sha"], message=c["message"].split("\n")[0],
+                author=c["author_login"], date=c["date"],
             )
             edges.append(_edge(file_id, commit_id, "MODIFIED_IN"))
-            ai_items.append({"id": commit_id, "type": "Commit", "raw": f"Commit {short} by {author_login}: {msg}"})
+            ai_items.append({
+                "id": commit_id, "type": "Commit",
+                "raw": f"Commit {short} by {c['author_login']}: {c['message'].split(chr(10))[0]}",
+            })
 
-            # Developer node
-            dev_id = f"dev:{author_login}"
-            if author_login not in seen_devs:
-                seen_devs.add(author_login)
-                avatar = (c.get("author") or {}).get("avatar_url", "")
-                nodes[dev_id] = _node(dev_id, "Developer", author_login, avatar_url=avatar)
+            dev_id = f"dev:{c['author_login']}"
+            if c["author_login"] not in seen_devs:
+                seen_devs.add(c["author_login"])
+                nodes[dev_id] = _node(dev_id, "Developer", c["author_login"], avatar_url=c["avatar_url"])
             edges.append(_edge(commit_id, dev_id, "AUTHORED_BY"))
 
-            # ── 2. PRs linked to this commit ──────────────────────────
-            try:
-                prs = await _gh_get(
-                    client, f"/repos/{owner}/{repo_name}/commits/{sha}/pulls",
-                ) or []
-            except Exception:
-                prs = []
-
-            # Also parse PR numbers from commit message
-            msg_full = c["commit"]["message"]
-            inline_pr_nums = [int(n) for n in _NUM_RE.findall(msg_full) if int(n) < 100000]
-
-            all_pr_nums = {pr["number"] for pr in prs} | set(inline_pr_nums)
-
-            for pr_data in prs:
+            for pr_data in c["prs"]:
                 pr_num = pr_data["number"]
                 if pr_num in seen_prs:
+                    # still connect this commit to the already-known PR
+                    edges.append(_edge(commit_id, f"pr:{pr_num}", "PART_OF"))
                     continue
                 seen_prs.add(pr_num)
 
@@ -316,78 +482,79 @@ async def build_provenance_graph(
                 nodes[pr_id] = _node(
                     pr_id, "PullRequest", f"PR #{pr_num}",
                     number=pr_num,
-                    title=pr_data.get("title", ""),
-                    url=pr_data.get("html_url", ""),
-                    state=pr_data.get("state", ""),
-                    user=(pr_data.get("user") or {}).get("login", ""),
+                    title=pr_data["title"],
+                    url=pr_data["url"],
+                    state=pr_data["state"],
+                    user=pr_data["user"],
                 )
                 edges.append(_edge(commit_id, pr_id, "PART_OF"))
-                pr_opener = (pr_data.get("user") or {}).get("login", "")
-                if pr_opener:
-                    dev_node_id = f"dev:{pr_opener}"
-                    if pr_opener not in seen_devs:
-                        seen_devs.add(pr_opener)
-                        nodes[dev_node_id] = _node(dev_node_id, "Developer", pr_opener)
+                if pr_data["user"]:
+                    dev_node_id = f"dev:{pr_data['user']}"
+                    if pr_data["user"] not in seen_devs:
+                        seen_devs.add(pr_data["user"])
+                        nodes[dev_node_id] = _node(dev_node_id, "Developer", pr_data["user"])
                     edges.append(_edge(dev_node_id, pr_id, "OPENED"))
 
                 ai_items.append({
                     "id": pr_id, "type": "PullRequest",
-                    "raw": f"PR #{pr_num}: {pr_data.get('title','')}. {(pr_data.get('body') or '')[:400]}",
+                    "raw": f"PR #{pr_num}: {pr_data['title']}. {pr_data['body'][:400]}",
                 })
 
-                # ── 3. Issues linked from PR body ────────────────────
-                pr_body = pr_data.get("body") or ""
-                issue_nums = [int(n) for n in _ISSUE_RE.findall(pr_body)]
-                # also bare #N refs
-                issue_nums += [int(n) for n in _NUM_RE.findall(pr_body) if int(n) < 100000]
-                issue_nums = list(set(issue_nums))
+                # Closing issues already delivered by GraphQL — no extra calls
+                for issue in pr_data["closing_issues"]:
+                    if issue["number"] in seen_issues or issue["number"] == pr_num:
+                        continue
+                    seen_issues.add(issue["number"])
+                    _add_issue_node(pr_id, issue, "CLOSES")
 
-                for issue_num in issue_nums[:4]:
+                # Keyword-linked issues from the PR body (closes/fixes/refs #N).
+                # Bare #N mentions are only used as a fallback — they were too noisy.
+                pr_body = pr_data["body"]
+                issue_nums = [int(n) for n in _ISSUE_RE.findall(pr_body)]
+                if not issue_nums:
+                    issue_nums = [int(n) for n in _NUM_RE.findall(pr_body) if int(n) < 100000][:2]
+                closes_nums = {int(n) for n in _CLOSES_RE.findall(pr_body)}
+                for issue_num in list(dict.fromkeys(issue_nums))[:4]:
                     if issue_num in seen_issues or issue_num == pr_num:
                         continue
                     seen_issues.add(issue_num)
+                    rel = "CLOSES" if issue_num in closes_nums else "REFERENCES"
+                    pending_issue_refs.append((pr_id, issue_num, rel))
 
+        # ── 3. Fetch referenced issues in parallel ────────────────────
+        if pending_issue_refs:
+            pending_issue_refs = pending_issue_refs[:20]
+            yield {"type": "step", "message": f"Fetching {len(pending_issue_refs)} referenced issues in parallel…"}
+            sem = asyncio.Semaphore(8)
+
+            async def _fetch_issue(num: int):
+                async with sem:
                     try:
-                        issue_data = await _gh_get(
-                            client, f"/repos/{owner}/{repo_name}/issues/{issue_num}"
-                        )
+                        return await _gh_get(client, f"/repos/{owner}/{repo_name}/issues/{num}")
                     except Exception:
-                        issue_data = None
+                        return None
 
-                    if not issue_data or "pull_request" in issue_data:
-                        continue
+            issue_results = await asyncio.gather(*[_fetch_issue(num) for _, num, _ in pending_issue_refs])
+            for (pr_id, issue_num, rel), issue_data in zip(pending_issue_refs, issue_results):
+                if not issue_data or "pull_request" in issue_data:
+                    continue
+                _add_issue_node(pr_id, {
+                    "number": issue_num,
+                    "title":  issue_data.get("title", ""),
+                    "body":   issue_data.get("body") or "",
+                    "url":    issue_data.get("html_url", ""),
+                    "state":  issue_data.get("state", ""),
+                }, rel)
 
-                    issue_id = f"issue:{issue_num}"
-                    nodes[issue_id] = _node(
-                        issue_id, "Issue", f"#{issue_num}",
-                        number=issue_num,
-                        title=issue_data.get("title", ""),
-                        url=issue_data.get("html_url", ""),
-                        state=issue_data.get("state", ""),
-                    )
-                    rel = "CLOSES" if re.search(
-                        rf"(?:closes?|fixes?|resolves?)\s*#{issue_num}", pr_body, re.I
-                    ) else "REFERENCES"
-                    edges.append(_edge(pr_id, issue_id, rel))
-                    ai_items.append({
-                        "id": issue_id, "type": "Issue",
-                        "raw": f"Issue #{issue_num}: {issue_data.get('title','')}. {(issue_data.get('body') or '')[:400]}",
-                    })
-
-    # ── 4. AI "why" summaries (per-node) ─────────────────────────────
-    yield {"type": "step", "message": f"Generating per-node reasoning for {len(ai_items)} artifacts…"}
-    why_map = await _ai_why(ai_items[:30])
+    # ── 4+5. AI reasoning + evolution narrative (concurrent) ─────────
+    yield {"type": "step", "message": f"Generating AI reasoning for {len(ai_items)} artifacts + evolution narrative…"}
+    why_map, narrative = await asyncio.gather(
+        _ai_why(ai_items[:30]),
+        _ai_narrative(repo=f"{owner}/{repo_name}", file_path=file_path, ai_items=ai_items[:30]),
+    )
     for node_id, why in why_map.items():
         if node_id in nodes:
             nodes[node_id]["why"] = why
-
-    # ── 5. AI evolution narrative (holistic) ──────────────────────────
-    yield {"type": "step", "message": "Writing AI evolution narrative for the full file history…"}
-    narrative = await _ai_narrative(
-        repo=f"{owner}/{repo_name}",
-        file_path=file_path,
-        ai_items=ai_items[:30],
-    )
     yield {"type": "narrative", "text": narrative}
 
     # ── 6. Emit result ────────────────────────────────────────────────

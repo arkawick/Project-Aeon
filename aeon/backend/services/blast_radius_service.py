@@ -30,6 +30,7 @@ NODE_COLORS = {
     "Infrastructure": "#ec4899",
     "Dependencies":   "#ef4444",
     "Docs":           "#94a3b8",
+    "Incident":       "#9cdef2",
 }
 
 RISK_COLOR = {"HIGH": "#ef4444", "MEDIUM": "#f59e0b", "LOW": "#22c55e", "UNKNOWN": "#64748b"}
@@ -148,12 +149,54 @@ def _edge(source: str, target: str, rel: str) -> dict[str, Any]:
     return {"source": source, "target": target, "type": rel}
 
 
+async def _search_incident_memory(
+    pr_title: str,
+    changed_files: list[tuple],
+    services: set[str],
+) -> list[dict[str, Any]]:
+    """
+    Query Aeon's ChromaDB incident memory for past incidents related to this PR.
+    A match survives if a changed filename literally appears in the incident
+    document, or if the semantic similarity is high enough on its own.
+    """
+    try:
+        from core.instances import chroma
+    except Exception:
+        return []
+
+    basenames = [fp.split("/")[-1] for fp, *_ in changed_files]
+    query = (
+        f"{pr_title}\n"
+        f"Changed files: {', '.join(basenames[:20])}\n"
+        f"Services: {', '.join(sorted(services)) or 'n/a'}"
+    )
+    hits = await chroma.search_similar(query, top_k=5)
+
+    matches: list[dict[str, Any]] = []
+    for h in hits:
+        doc = (h.get("document") or "").lower()
+        meta = h.get("metadata") or {}
+        similarity = h.get("similarity", 0)
+        matched = sorted({bn for bn in basenames if len(bn) > 3 and bn.lower() in doc})
+        if not matched and similarity < 0.35:
+            continue
+        matches.append({
+            "incident_id":   meta.get("incident_id", h.get("id", "")),
+            "similarity":    similarity,
+            "matched_files": matched[:6],
+            "root_cause":    (meta.get("root_cause") or "")[:300],
+            "fix":           (meta.get("fix") or "")[:300],
+        })
+    return matches
+
+
 async def _ai_risk(
     repo: str,
     pr_title: str,
     pr_body: str,
     changed_files: list[tuple],
     impact_counts: dict[str, int],
+    memory_matches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -165,6 +208,15 @@ async def _ai_risk(
     )
     impact_str = ", ".join(f"{k}: {v}" for k, v in impact_counts.items())
 
+    memory_str = "None found."
+    if memory_matches:
+        memory_str = "\n".join(
+            f"  - Incident {m['incident_id']} (similarity {m['similarity']:.0%}"
+            + (f", mentions changed files: {', '.join(m['matched_files'])}" if m["matched_files"] else "")
+            + f") — root cause: {m['root_cause'] or 'n/a'}; fix: {m['fix'] or 'n/a'}"
+            for m in memory_matches
+        )
+
     prompt = f"""You are a senior DevOps engineer reviewing a pull request for production deployment risk.
 
 Repository: {repo}
@@ -175,6 +227,12 @@ Changed files:
 {file_lines}
 
 Impact summary: {impact_str}
+
+Related past incidents from Aeon's incident memory (vector search over previous CI/CD failures):
+{memory_str}
+
+If a past incident is relevant, reference it explicitly in the narrative (e.g. "this matches incident #421")
+and factor it into the risk level and must_test items.
 
 Respond ONLY with a JSON object in this exact format (no markdown, no explanation):
 {{
@@ -300,6 +358,26 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
 
         edges.append(_edge(file_id, impact_id, "IMPACTS"))
 
+    # ── Incident memory recall ────────────────────────────────────────
+    yield {"type": "step", "message": "Searching Aeon incident memory for related past incidents…"}
+    services_touched = {n["label"] for n in nodes.values() if n["type"] == "Service"}
+    memory_matches = await _search_incident_memory(pr.get("title", ""), changed_files, services_touched)
+    if memory_matches:
+        yield {"type": "step", "message": f"Found {len(memory_matches)} related past incident(s) in memory."}
+        for m in memory_matches:
+            inc_id = f"incident:{m['incident_id']}"
+            nodes[inc_id] = _node(
+                inc_id, "Incident", str(m["incident_id"]),
+                similarity=m["similarity"],
+                matched_files=m["matched_files"],
+                root_cause=m["root_cause"],
+                fix=m["fix"],
+            )
+            edges.append(_edge(pr_id, inc_id, "RECALLS"))
+    else:
+        yield {"type": "step", "message": "No related incidents found in memory."}
+    yield {"type": "memory", "matches": memory_matches}
+
     # ── AI risk assessment ────────────────────────────────────────────
     yield {"type": "step", "message": "Generating AI risk assessment…"}
     risk_result = await _ai_risk(
@@ -308,6 +386,7 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
         pr_body=pr.get("body", ""),
         changed_files=changed_files,
         impact_counts=impact_counts,
+        memory_matches=memory_matches,
     )
     yield {"type": "risk", **risk_result}
 
@@ -328,5 +407,6 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
             "deletions":    pr.get("deletions", 0),
             "impacts":      impact_counts,
             "risk_level":   risk_result.get("risk_level", "UNKNOWN"),
+            "related_incidents": len(memory_matches),
         },
     }

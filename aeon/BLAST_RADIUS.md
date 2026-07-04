@@ -17,6 +17,7 @@ GitHub PR API → changed files list
     ├──► Classify each file (Service / Test / Config / Pipeline / Infrastructure / Dependencies / Docs)
     ├──► Infer service names from directory structure
     ├──► Build impact graph  (PR → Files → Impact areas)
+    ├──► Incident memory recall (ChromaDB vector search over past incidents)
     └──► Claude risk assessment (HIGH / MEDIUM / LOW + deploy recommendation)
 ```
 
@@ -78,6 +79,23 @@ This PR is ideal for demo because it touches 4 different impact categories:
 | `History.md` | Docs | LOW |
 
 A dependency bump that ripples into core response handling + download tests — the kind of change where blast radius analysis matters most.
+
+---
+
+## Incident memory recall
+
+Before the AI risk assessment, the PR is checked against **Aeon's incident memory** (the same ChromaDB store the AI Assistant writes to after every analysis). A past incident is recalled when:
+
+- a changed filename literally appears in the incident's document, **or**
+- the semantic similarity between the PR and the incident is ≥ 35%
+
+Recalled incidents show up in three places:
+
+1. A cyan **Incident Memory** banner under the risk banner — incident id, match %, shared files, past root cause
+2. **Incident nodes** in the graph, linked to the PR with `RECALLS` edges (click for past root cause + fix)
+3. The Claude risk prompt — so the narrative can say *"this matches incident #421"* and adjust the risk level
+
+If ChromaDB is down or memory is empty, the analysis proceeds without recall (no errors).
 
 ---
 

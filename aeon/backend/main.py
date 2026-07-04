@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api import pipelines, incidents, github, jenkins, n8n, ai, memory, integrations, actions, odysseus, provenance, blast_radius
+from api import pipelines, incidents, github, jenkins, n8n, ai, memory, integrations, actions, odysseus, provenance, blast_radius, cochange
 
 
 @asynccontextmanager
@@ -44,3 +44,4 @@ app.include_router(actions.router, prefix="/api")
 app.include_router(odysseus.router, prefix="/api")
 app.include_router(provenance.router, prefix="/api")
 app.include_router(blast_radius.router, prefix="/api")
+app.include_router(cochange.router, prefix="/api")

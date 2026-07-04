@@ -3,3 +3,4 @@ git
 pipeline-stage-view
 ansicolor
 timestamper
+http_request

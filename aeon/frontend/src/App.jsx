@@ -8,6 +8,7 @@ import Workflows from './pages/Workflows.jsx'
 import GraphView from './pages/GraphView.jsx'
 import Provenance from './pages/Provenance.jsx'
 import BlastRadius from './pages/BlastRadius.jsx'
+import CoChange from './pages/CoChange.jsx'
 
 function Layout({ children }) {
   return (
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/graph" element={<FullLayout><GraphView /></FullLayout>} />
         <Route path="/provenance" element={<FullLayout><Provenance /></FullLayout>} />
         <Route path="/blast" element={<FullLayout><BlastRadius /></FullLayout>} />
+        <Route path="/cochange" element={<FullLayout><CoChange /></FullLayout>} />
       </Routes>
     </BrowserRouter>
   )

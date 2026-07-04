@@ -132,6 +132,12 @@ export function streamBlastRadius(repo, pr) {
   return new EventSource(url)
 }
 
+// Co-Change Coupling
+export function streamCoChange(repo, commits = 100, filePath = '') {
+  const url = `/api/cochange/stream?repo=${encodeURIComponent(repo)}&commits=${commits}&file_path=${encodeURIComponent(filePath)}`
+  return new EventSource(url)
+}
+
 export async function getCommitDiff(repo, sha) {
   const { data } = await api.get(`/provenance/diff?repo=${encodeURIComponent(repo)}&sha=${encodeURIComponent(sha)}`)
   return data

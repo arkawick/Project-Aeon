@@ -121,16 +121,18 @@ Switch with the **Force / Timeline** buttons in the toolbar above the graph.
 
 ---
 
-## Commit depth guide
+## Fetch strategy & commit depth
 
-| Setting | API calls | Time | When to use |
-|---|---|---|---|
-| 5 commits | ~10–20 | 5–10s | Quick demo |
-| 10 commits | ~20–50 | 10–20s | Most cases |
-| 20 commits | ~40–100 | 20–40s | Deep research |
-| 30 commits | ~60–150 | 30–60s | Full history audit (needs `GITHUB_TOKEN`) |
+With `GITHUB_TOKEN` set, the entire history — commits, associated PRs, and closing issues — is fetched in **one GraphQL request** (plus a small parallel batch for issues referenced in PR bodies). A 10-commit trace completes in ~2 seconds and a 30-commit trace barely dents the 5000/hr quota.
 
-Each commit can trigger 1 PR lookup + up to 4 issue lookups. The unauthenticated rate limit of 60 req/hr is exhausted in ~3 runs at depth 10. Add `GITHUB_TOKEN` to avoid this.
+| Setting | With token (GraphQL) | Without token (parallel REST) |
+|---|---|---|
+| 10 commits | 1–2 requests, ~2s | ~11–15 requests, ~3–5s |
+| 30 commits | 1–2 requests, ~3s | ~31–50 requests, ~5–10s |
+
+Without a token the service falls back to REST, but PR lookups now run **in parallel** (8 at a time) instead of serially. The unauthenticated limit is still 60 req/hr, so add `GITHUB_TOKEN` for anything beyond quick demos.
+
+Issue links are keyword-based (`closes/fixes/resolves/refs #N`); bare `#N` mentions are only used as a fallback (max 2) to keep the graph free of spurious issue nodes.
 
 ---
 

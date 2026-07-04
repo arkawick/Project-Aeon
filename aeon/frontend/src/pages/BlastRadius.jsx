@@ -5,7 +5,7 @@ import {
   Zap, Loader2, AlertCircle, X, ChevronRight,
   GitPullRequest, FileCode, Server, TestTube, Settings,
   GitBranch, Package, HardDrive, FileText, Info,
-  AlertTriangle, CheckCircle, ShieldAlert,
+  AlertTriangle, CheckCircle, ShieldAlert, Brain,
 } from 'lucide-react'
 
 const NODE_META = {
@@ -18,6 +18,7 @@ const NODE_META = {
   Infrastructure: { icon: HardDrive,      label: 'Infrastructure' },
   Dependencies:   { icon: Package,        label: 'Dependencies' },
   Docs:           { icon: FileText,       label: 'Docs' },
+  Incident:       { icon: Brain,          label: 'Past Incident' },
 }
 
 const NODE_COLORS = {
@@ -30,6 +31,7 @@ const NODE_COLORS = {
   Infrastructure: '#ec4899',
   Dependencies:   '#ef4444',
   Docs:           '#94a3b8',
+  Incident:       '#9cdef2',
 }
 
 const RISK_STYLES = {
@@ -83,6 +85,7 @@ export default function BlastRadius() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] })
   const [meta, setMeta]     = useState(null)
   const [risk, setRisk]     = useState(null)
+  const [memory, setMemory] = useState(null)
   const [selected, setSelected] = useState(null)
   const [error, setError]   = useState('')
   const [layout, setLayout] = useState('radial')
@@ -122,6 +125,7 @@ export default function BlastRadius() {
     originalGraph.current = { nodes: [], links: [] }
     setMeta(null)
     setRisk(null)
+    setMemory(null)
     setSelected(null)
     setError('')
 
@@ -134,6 +138,8 @@ export default function BlastRadius() {
         setSteps(prev => [...prev, event.message])
       } else if (event.type === 'risk') {
         setRisk(event)
+      } else if (event.type === 'memory') {
+        setMemory(event.matches)
       } else if (event.type === 'result') {
         const orig = { nodes: event.nodes, links: event.edges }
         originalGraph.current = orig
@@ -374,6 +380,39 @@ export default function BlastRadius() {
           </div>
         )}
 
+        {/* ── Incident Memory banner ──────────────────────────────── */}
+        {memory && memory.length > 0 && (
+          <div className="shrink-0 border-b border-aeon-border px-5 py-3 bg-cyan-400/5">
+            <div className="flex items-start gap-3">
+              <div className="shrink-0 mt-0.5 w-6 h-6 rounded-lg border border-cyan-400/30 bg-cyan-400/10 flex items-center justify-center">
+                <Brain size={12} className="text-cyan-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-bold uppercase tracking-wide text-cyan-300">Incident Memory</span>
+                  <span className="text-xs text-slate-400">
+                    · {memory.length} related past incident{memory.length > 1 ? 's' : ''} recalled
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {memory.map((m, i) => (
+                    <div key={m.incident_id || i} className="text-xs text-slate-300 leading-relaxed">
+                      <span className="font-mono text-cyan-300">{m.incident_id}</span>
+                      <span className="text-slate-500"> · {Math.round((m.similarity || 0) * 100)}% match</span>
+                      {m.matched_files?.length > 0 && (
+                        <span className="text-slate-500">
+                          {' '}· touches <span className="font-mono text-slate-400">{m.matched_files.join(', ')}</span>
+                        </span>
+                      )}
+                      {m.root_cause && <span className="text-slate-400"> — {m.root_cause}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Graph toolbar ───────────────────────────────────────── */}
         {graphData.nodes.length > 0 && (
           <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-aeon-border bg-aeon-surface">
@@ -429,8 +468,8 @@ export default function BlastRadius() {
               nodeCanvasObject={paintNode}
               nodeCanvasObjectMode={() => 'replace'}
               onNodeClick={node => setSelected(selected?.id === node.id ? null : node)}
-              linkColor={l => l.type === 'IMPACTS' ? '#f9741633' : '#33415566'}
-              linkWidth={l => l.type === 'IMPACTS' ? 1.5 : 1}
+              linkColor={l => l.type === 'IMPACTS' ? '#f9741633' : l.type === 'RECALLS' ? '#9cdef255' : '#33415566'}
+              linkWidth={l => l.type === 'IMPACTS' ? 1.5 : l.type === 'RECALLS' ? 1.5 : 1}
               linkDirectionalArrowLength={4}
               linkDirectionalArrowRelPos={1}
               linkLabel={l => l.type}
@@ -509,6 +548,30 @@ export default function BlastRadius() {
                     <div className="flex justify-between">
                       <span className="text-slate-500">Author</span>
                       <span className="text-slate-300">{selected.author}</span>
+                    </div>
+                  )}
+                  {selected.similarity !== undefined && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Memory match</span>
+                      <span className="text-cyan-300 font-mono">{Math.round(selected.similarity * 100)}%</span>
+                    </div>
+                  )}
+                  {selected.matched_files?.length > 0 && (
+                    <div>
+                      <span className="text-slate-500 block mb-0.5">Shared files</span>
+                      <p className="text-slate-300 font-mono break-all">{selected.matched_files.join(', ')}</p>
+                    </div>
+                  )}
+                  {selected.root_cause && (
+                    <div>
+                      <span className="text-slate-500 block mb-0.5">Past root cause</span>
+                      <p className="text-slate-300 leading-relaxed">{selected.root_cause}</p>
+                    </div>
+                  )}
+                  {selected.fix && (
+                    <div>
+                      <span className="text-slate-500 block mb-0.5">Past fix</span>
+                      <p className="text-slate-300 leading-relaxed">{selected.fix}</p>
                     </div>
                   )}
                 </div>
