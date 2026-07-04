@@ -42,7 +42,9 @@ async def list_workflows() -> list[dict[str, Any]]:
     # Try live n8n API first; fall back to mock (which has the right webhook IDs)
     if os.getenv("N8N_API_KEY", "").strip():
         result = await n8n_svc.list_workflows()
-        if result and "error" not in str(result[0]):
+        # The service signals failure with [{"error": ...}] — check the KEY, not a
+        # substring of the JSON (real workflows contain "onError" in node settings).
+        if result and "error" not in result[0]:
             return result
     return MOCK_WORKFLOWS
 
