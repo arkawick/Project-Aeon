@@ -95,13 +95,17 @@ async def _check_odysseus() -> dict[str, Any]:
 
 
 async def _check_claude() -> dict[str, Any]:
-    configured = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+    from core import llm
+
+    provider = llm.active_provider()  # "azure" | "anthropic" | "mock"
+    configured = provider != "mock"
     return {
-        "name": "Claude API",
+        "name": "AI (LLM)",
         "configured": configured,
-        "connected": configured,  # no ping endpoint; assume live if key present
+        "connected": configured,  # no ping endpoint; assume live if a key is present
         "mode": "live" if configured else "mock",
-        "model": "claude-sonnet-4-6",
+        "provider": provider,
+        "model": llm.provider_label(),
     }
 
 

@@ -113,9 +113,10 @@ async def _ai_why(items: list[dict[str, str]]) -> dict[str, str]:
     if not items:
         return {}
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {item["id"]: item.get("raw", "No AI summary (ANTHROPIC_API_KEY not set)") for item in items}
+    from core import llm
+
+    if not llm.llm_available():
+        return {item["id"]: item.get("raw", "No AI summary (no LLM key set)") for item in items}
 
     prompt_lines = ["For each item below, give a concise 1–2 sentence answer to: 'WHY was this change made?'",
                     "Focus on intent and reasoning, not description. Reply in this exact format:",
@@ -129,13 +130,9 @@ async def _ai_why(items: list[dict[str, str]]) -> dict[str, str]:
         prompt_lines.append(f"Content: {item['raw'][:600]}")
         prompt_lines.append("---")
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    msg = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
-    )
-    text = msg.content[0].text
+    text = await llm.complete(system="", user="\n".join(prompt_lines), max_tokens=1500)
+    if not text:
+        return {item["id"]: item.get("raw", "")[:120] for item in items}
 
     result: dict[str, str] = {}
     for item in items:
@@ -153,8 +150,9 @@ async def _ai_narrative(repo: str, file_path: str, ai_items: list[dict]) -> str:
     Send the full commit/PR/issue history to Claude in one shot and get back
     a 3–5 sentence story explaining WHY this file evolved the way it did.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key or not ai_items:
+    from core import llm
+
+    if not llm.llm_available() or not ai_items:
         return ""
 
     history_lines = []
@@ -180,13 +178,8 @@ Cover:
 Be specific — reference actual PR numbers, issue numbers, and developer names where relevant.
 Write in past tense. Focus on WHY, not WHAT. No bullet points, just flowing prose."""
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    msg = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=400,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text.strip()
+    text = await llm.complete(system="", user=prompt, max_tokens=400)
+    return (text or "").strip()
 
 
 async def fetch_commit_diff(repo: str, sha: str) -> dict:

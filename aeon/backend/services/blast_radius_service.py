@@ -10,6 +10,7 @@ Graph schema:
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import os
 import re
@@ -19,6 +20,11 @@ import anthropic
 import httpx
 
 GH_API = "https://api.github.com"
+
+# Robustness limits
+MAX_FILE_PAGES = 5    # paginate up to 500 changed files on large PRs
+MAX_GRAPH_FILES = 40  # cap graph nodes for readability (counts still cover all files)
+GH_RETRIES = 3        # retries on transient network / 5xx errors
 
 NODE_COLORS = {
     "PR":             "#22c55e",
@@ -45,29 +51,51 @@ def _gh_headers() -> dict[str, str]:
 
 
 async def _gh_get(client: httpx.AsyncClient, endpoint: str, **params) -> Any:
-    resp = await client.get(f"{GH_API}{endpoint}", headers=_gh_headers(), params=params, timeout=15.0)
-    if resp.status_code == 404:
-        return None
-    if resp.status_code in (403, 429):
-        has_token = bool(os.getenv("GITHUB_TOKEN", "").strip())
-        reset_ts = resp.headers.get("X-RateLimit-Reset", "")
-        reset_str = ""
-        if reset_ts:
-            import datetime
-            try:
-                reset_str = f" Resets at {datetime.datetime.utcfromtimestamp(int(reset_ts)).strftime('%H:%M UTC')}."
-            except Exception:
-                pass
-        if not has_token:
-            raise RuntimeError(
-                "GitHub rate limit — add GITHUB_TOKEN to aeon/backend/.env and run: docker compose up -d backend." + reset_str
-            )
-        retry_after = resp.headers.get("Retry-After", "")
-        if retry_after:
-            raise RuntimeError(f"GitHub secondary rate limit. Wait {retry_after}s before retrying." + reset_str)
-        raise RuntimeError(f"GitHub rate limit exhausted (authenticated).{reset_str}")
-    resp.raise_for_status()
-    return resp.json()
+    """GET a GitHub endpoint with retry + backoff on transient failures.
+
+    Retries network errors and 5xx responses; never retries 403/429 (rate
+    limit) or 404 (not found), which are surfaced immediately.
+    """
+    url = f"{GH_API}{endpoint}"
+    last_error = "unknown error"
+
+    for attempt in range(GH_RETRIES):
+        try:
+            resp = await client.get(url, headers=_gh_headers(), params=params, timeout=20.0)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = f"network error: {exc}"
+            await asyncio.sleep(0.5 * (2 ** attempt))
+            continue
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code in (403, 429):
+            has_token = bool(os.getenv("GITHUB_TOKEN", "").strip())
+            reset_ts = resp.headers.get("X-RateLimit-Reset", "")
+            reset_str = ""
+            if reset_ts:
+                import datetime
+                try:
+                    reset_str = f" Resets at {datetime.datetime.utcfromtimestamp(int(reset_ts)).strftime('%H:%M UTC')}."
+                except Exception:
+                    pass
+            if not has_token:
+                raise RuntimeError(
+                    "GitHub rate limit — add GITHUB_TOKEN to aeon/backend/.env and run: docker compose up -d backend." + reset_str
+                )
+            retry_after = resp.headers.get("Retry-After", "")
+            if retry_after:
+                raise RuntimeError(f"GitHub secondary rate limit. Wait {retry_after}s before retrying." + reset_str)
+            raise RuntimeError(f"GitHub rate limit exhausted (authenticated).{reset_str}")
+        if resp.status_code >= 500:
+            last_error = f"GitHub {resp.status_code} server error"
+            await asyncio.sleep(0.5 * (2 ** attempt))
+            continue
+
+        resp.raise_for_status()
+        return resp.json()
+
+    raise RuntimeError(f"GitHub request failed after {GH_RETRIES} attempts ({last_error}).")
 
 
 def _classify_file(filepath: str) -> tuple[str, str]:
@@ -198,9 +226,10 @@ async def _ai_risk(
     impact_counts: dict[str, int],
     memory_matches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {"risk_level": "UNKNOWN", "narrative": "Add ANTHROPIC_API_KEY to .env for AI risk assessment.", "deploy_recommendation": "", "must_test": []}
+    from core import llm
+
+    if not llm.llm_available():
+        return {"risk_level": "UNKNOWN", "narrative": "Add AZURE_OPENAI_API_KEY or ANTHROPIC_API_KEY to .env for AI risk assessment.", "deploy_recommendation": "", "must_test": []}
 
     file_lines = "\n".join(
         f"  [{cat}/{risk}] {fp}  +{add}/-{rem}"
@@ -244,20 +273,17 @@ Respond ONLY with a JSON object in this exact format (no markdown, no explanatio
 
 Be specific — reference actual filenames and inferred service names."""
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    msg = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=350,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = msg.content[0].text.strip()
+    text = await llm.complete(system="", user=prompt, max_tokens=500)
+    if text is None:
+        return {"risk_level": "UNKNOWN", "narrative": "AI risk assessment unavailable (no LLM provider responded).", "deploy_recommendation": "", "must_test": []}
+    text = text.strip()
     try:
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             return _json.loads(m.group())
     except Exception:
         pass
-    return {"risk_level": "MEDIUM", "narrative": text, "deploy_recommendation": "", "must_test": []}
+    return {"risk_level": "MEDIUM", "narrative": text or "No assessment returned.", "deploy_recommendation": "", "must_test": []}
 
 
 async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[str, Any]]:
@@ -303,10 +329,17 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
         # ── Changed files ─────────────────────────────────────────────
         total = pr.get("changed_files", "?")
         yield {"type": "step", "message": f"Analyzing {total} changed files…"}
-        files_data = await _gh_get(
-            client, f"/repos/{owner}/{repo_name}/pulls/{pr_number}/files",
-            per_page=100,
-        )
+        files_data: list[dict] = []
+        for page in range(1, MAX_FILE_PAGES + 1):
+            batch = await _gh_get(
+                client, f"/repos/{owner}/{repo_name}/pulls/{pr_number}/files",
+                per_page=100, page=page,
+            )
+            if not batch:
+                break
+            files_data.extend(batch)
+            if len(batch) < 100:  # last page reached
+                break
         if not files_data:
             yield {"type": "error", "message": "Could not fetch PR files."}
             return
@@ -318,7 +351,7 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
     impact_counts: dict[str, int] = {}
     seen_impacts: set[str] = set()
 
-    for f in files_data[:30]:
+    for idx, f in enumerate(files_data):
         fp        = f.get("filename", "")
         additions = f.get("additions", 0)
         deletions = f.get("deletions", 0)
@@ -327,6 +360,10 @@ async def build_blast_radius(repo: str, pr_number: int) -> AsyncIterator[dict[st
         category, risk = _classify_file(fp)
         changed_files.append((fp, category, risk, additions, deletions))
         impact_counts[category] = impact_counts.get(category, 0) + 1
+
+        # Count every file above, but cap graph nodes for readability
+        if idx >= MAX_GRAPH_FILES:
+            continue
 
         # File node
         file_id = f"file:{fp}"

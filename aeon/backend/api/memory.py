@@ -60,6 +60,19 @@ SEED_INCIDENTS = [
         "pipeline_id": "pipe_docker_55",
         "severity": "medium",
     },
+    # Demo incident for Blast Radius recall on expressjs/express PR 7233. The
+    # response.js / package.json filenames in the text are what make the recall
+    # fire (~0.78) when that PR is analyzed. Keep those filenames present.
+    {
+        "id": "inc_demo_421",
+        "description": "content-disposition upgrade broke response.js attachment handling; a package.json dependency bump caused download acceptance test regressions",
+        "logs": "TypeError: contentDisposition is not a function\n  at ServerResponse.attachment (lib/response.js:1043)\n  npm ERR! peer dependency mismatch in package.json",
+        "root_cause": "Upgrading content-disposition in package.json changed its export shape; lib/response.js called it as the old default export, breaking res.attachment/res.download.",
+        "fix": "Update lib/response.js to use the new content-disposition API and pin the version in package.json; re-run download acceptance tests.",
+        "error_type": "dependency_upgrade_regression",
+        "pipeline_id": "pipe_express_421",
+        "severity": "high",
+    },
 ]
 
 

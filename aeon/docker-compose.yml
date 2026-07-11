@@ -92,13 +92,14 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - chroma_data:/chroma/chroma
+      # Chroma 1.x persists to /data (NOT /chroma/chroma) — mount the volume there
+      # or all memory is lost on restart/reboot.
+      - chroma_data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
+    # No healthcheck: the chromadb/chroma image is minimal (no curl/wget/python on
+    # PATH) so there's nothing to probe with, and nothing depends on its health
+    # status. A missing healthcheck reports a clean "Up" instead of a misleading
+    # "unhealthy". The backend connects to it independently at startup.
 
   # ── Graph memory — Neo4j ────────────────────────────────────────────────────
   neo4j:

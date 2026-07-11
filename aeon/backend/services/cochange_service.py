@@ -66,8 +66,9 @@ def _dir_color(path: str) -> str:
 
 async def _ai_insight(repo: str, pairs: list[dict], commits_analyzed: int) -> str:
     """One short Claude read on what the strongest couplings mean."""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key or not pairs:
+    from core import llm
+
+    if not llm.llm_available() or not pairs:
         return ""
 
     pair_lines = "\n".join(
@@ -87,13 +88,8 @@ which couplings look healthy (e.g. code + its test) vs. risky (e.g. two unrelate
 moving in lockstep), and the single most important thing a developer should watch out for
 when editing one of these files. Reference actual filenames. Plain prose, no bullets."""
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    msg = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text.strip()
+    text = await llm.complete(system="", user=prompt, max_tokens=400)
+    return (text or "").strip()
 
 
 async def build_cochange_graph(
