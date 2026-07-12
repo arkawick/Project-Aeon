@@ -91,12 +91,13 @@ AI risk assessment: HIGH / MEDIUM / LOW
   GitHub API      Jenkins API      n8n Webhooks
       │               │
       ↓               ↓
-    LangGraph Agent (Claude claude-sonnet-4-6)
+    LangGraph Agent (provider-agnostic: Azure OpenAI or Claude)
               |
     ┌─────────┴─────────┐
     ↓                   ↓
  ChromaDB            Neo4j
-(vector search)  (graph relationships)
+(vector recall +   (graph relationships
+ re-rank)           + GraphRAG expansion)
 
 AI Intelligence Services (same backend):
   provenance_service.py  →  /api/provenance/stream  (Code Provenance)
@@ -109,11 +110,12 @@ AI Intelligence Services (same backend):
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI (Python) |
-| LLM | Claude API (`claude-sonnet-4-6`) via AsyncAnthropic |
-| Agent Framework | LangGraph (StateGraph, astream streaming) |
+| Backend | FastAPI (Python 3.11) |
+| LLM | **Provider-agnostic** (`core/llm.py`): Azure OpenAI (`gpt-5-mini`) **or** Claude (`claude-sonnet-4-6`); tool-calling on both, mock fallback |
+| Agent Framework | LangGraph (StateGraph, astream streaming, provider-agnostic `run_turn()`) |
+| Retrieval | Two-stage re-rank (`services/rerank.py`) + GraphRAG (`services/graphrag.py`) |
 | Vector Memory | ChromaDB |
-| Graph Memory | Neo4j |
+| Graph Memory | Neo4j (self-healing connection) |
 | Structured DB | PostgreSQL |
 | Cache | Redis |
 | Frontend | React 18 + Vite + Tailwind CSS |
@@ -150,9 +152,13 @@ Project-Aeon/
 │   │   │   ├── provenance.py      ← Code Provenance API
 │   │   │   └── blast_radius.py    ← Blast Radius API
 │   │   ├── agents/           LangGraph graph + 8 tools
-│   │   ├── core/             instances.py — shared singletons
-│   │   ├── memory/           chroma_store.py + neo4j_store.py
+│   │   ├── core/
+│   │   │   ├── instances.py  shared singletons
+│   │   │   └── llm.py        ← Provider-agnostic LLM (Azure/Anthropic/mock)
+│   │   ├── memory/           chroma_store.py + neo4j_store.py (self-healing)
 │   │   └── services/
+│   │       ├── rerank.py                ← Two-stage retrieval re-rank
+│   │       ├── graphrag.py              ← GraphRAG graph expansion
 │   │       ├── provenance_service.py   ← GitHub trace + AI narrative
 │   │       └── blast_radius_service.py ← PR impact classifier + AI risk
 │   ├── frontend/
@@ -178,6 +184,7 @@ Project-Aeon/
 │   ├── setup.py
 │   └── README.md
 ├── n8n-setup/                10 workflow JSONs + README
+├── reseed.ps1                Restore demo memory after a volume wipe (idempotent)
 ├── AEON_README.md            ← This file
 └── DEMO.md                   90-second demo runbook
 ```
@@ -220,16 +227,21 @@ Neo4j force-directed graph of all incident relationships — which error types r
 
 ## Memory Layer
 
-**ChromaDB** — semantic vector search:
+**Two-stage retrieval** (`services/rerank.py`):
+- Stage 1 — wide ChromaDB vector recall (top-10), the agent's own write-backs (`status=analyzed`) excluded so it never grounds on its own past output
+- Stage 2 — weighted re-rank: `0.60·cosine + field agreement (error_type / pipeline / source / repo) + recency`; absent context reinforces the semantic signal. Emits human-readable `match_reasons` ("52% semantic", "same error_type") shown on the memory card
+
+**GraphRAG expansion** (`services/graphrag.py`):
+- Takes the vector matches as anchors and expands through Neo4j: error type → proven fixes (+ reuse counts) → sibling incidents on other pipelines
+- That block is injected into the agent's system prompt, so the model reasons over graph relationships, not just the vector hits
+
+**ChromaDB** — semantic vector store:
 - Every incident stored with embeddings of description + logs + root cause
-- `search_similar(query, top_k=3)` returns nearest incidents
-- Used by the agent's `search_chromadb_memory` tool
-- Code Provenance graphs cached for instant replay
+- Persists to `/data` (Chroma 1.x) so memory survives restarts; Code Provenance graphs cached for instant replay
 
 **Neo4j** — relationship graph:
-- Incident nodes: `Incident`, `Pipeline`, `ErrorType`, `Fix`
-- Provenance nodes: `ProvenanceNode` (File, Commit, PR, Issue, Developer)
-- Enables: "This exact error type was fixed the same way 3 times"
+- Incident nodes: `Incident`, `Pipeline`, `ErrorType`, `Fix`; Provenance nodes: `ProvenanceNode` (File, Commit, PR, Issue, Developer)
+- Connection **self-heals** the cold-start race (`_ensure_driver`, throttled reconnect) — no manual restart needed
 - Visualized on the Knowledge Graph page
 
 ---
@@ -256,7 +268,7 @@ Agent flow:
 search_memory → call_claude → execute_tools (loop) → synthesize → memory_writer
 ```
 
-Every analysis is automatically written back to ChromaDB + Neo4j (`memory_writer_node`).
+`search_memory` also auto-fetches the failing Jenkins build log (for the job named in the query) to ground the first turn, then runs two-stage retrieval + GraphRAG. `call_claude` uses `llm.run_turn()` — **real tool-calling on either Azure OpenAI or Anthropic** (neutral Anthropic-shaped messages/tools are translated to OpenAI format for Azure). Every analysis is automatically written back to ChromaDB + Neo4j (`memory_writer_node`).
 
 ---
 
@@ -265,7 +277,17 @@ Every analysis is automatically written back to ChromaDB + Neo4j (`memory_writer
 All in `aeon/backend/.env`:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...     # Required for live AI (mock works without it)
+# --- LLM provider — set ONE (Azure wins if both present); mock works without any ---
+# Azure OpenAI (AZURE_OPENAI_ENDPOINT is the FULL chat-completions URL, incl. api-version)
+AZURE_OPENAI_ENDPOINT=https://<gateway>/deployments/gpt-5-mini/chat/completions?api-version=2024-12-01-preview
+AZURE_OPENAI_DEPLOYMENT=gpt-5-mini
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+AZURE_OPENAI_API_KEY=...
+# ...or Anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+# Optional: force a provider — azure | anthropic | mock (blank = auto-detect)
+LLM_PROVIDER=
+
 GITHUB_TOKEN=ghp_...             # Required for Code Provenance + Blast Radius at depth
 GITHUB_ORG=                      # Your GitHub org (leave empty for personal repos)
 JENKINS_URL=http://localhost:8080
@@ -278,19 +300,23 @@ CHROMA_HOST=localhost
 CHROMA_PORT=8001
 ```
 
-After editing `.env`:
+After editing `.env` (a recreate is required — `restart` does NOT re-read env_file):
 ```powershell
 docker compose up -d backend
 ```
+Adding Azure needs the `openai` package (already in `requirements.txt`) — rebuild if upgrading an old image: `docker compose build backend`.
 
 ---
 
 ## Key Design Decisions
 
 - **`core/instances.py`** — shared singletons, no duplicate DB connections
+- **Provider-agnostic LLM (`core/llm.py`)** — Azure OpenAI → Anthropic → mock, chosen at runtime; `run_turn()` gives the agent real tool-calling on both providers (Anthropic ⇄ OpenAI message/tool translation), `complete()` serves the single-shot surfaces
+- **Two-stage retrieval + GraphRAG** — vector recall re-ranked by field agreement + recency, then expanded through the incident graph so the model reasons over relationships; the agent's own write-backs are excluded from grounding recall
 - **SSE streaming everywhere** — AI Assistant, Code Provenance, and Blast Radius all stream progress to the browser via `text/event-stream`; the UI never blocks waiting for a response
 - **`memory_writer_node`** — every incident analysis auto-stored, agent improves over time
 - **Human-in-the-loop PRs** — issues auto-create, PRs require explicit approval
+- **Resilient by design** — Neo4j self-heals the cold-start race (`_ensure_driver`); ChromaDB persists to `/data` so memory survives restarts; `reseed.ps1` restores demo memory after a `down -v`
 - **`originalGraph` ref pattern** — ForceGraph2D mutates node objects in place; storing immutable server data separately prevents ghost traces when switching layouts
 - **Mock fallback everywhere** — full demo works without any API tokens
 - **Jenkins on port 8088** — remapped from 8080 to avoid WSL/Tomcat conflict

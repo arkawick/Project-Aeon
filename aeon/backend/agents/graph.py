@@ -30,6 +30,7 @@ from core.instances import (
     neo4j as neo4j_store,
 )
 from core import llm
+from services import rerank, graphrag
 
 # Minimum ChromaDB cosine similarity for a hit to be surfaced/cited as a
 # "past incident match". Real sentence-embedding scores for genuinely related
@@ -53,7 +54,8 @@ class AgentState(TypedDict):
     events: Annotated[list[dict], operator.add]
     result: dict                                       # final structured output
     iteration: int
-    _claude_response: Any                              # passed between call_claude and routing
+    evidence: dict                                     # pre-gathered Jenkins build log
+    _claude_response: Any                              # LLMTurn from the last call_claude, used by routing
 
 # ---------------------------------------------------------------------------
 # Time helpers
@@ -342,6 +344,8 @@ def _build_memory_match(hit: dict) -> dict:
         "fix": meta.get("fix", meta.get("suggested_fix", "")),
         "error_type": meta.get("error_type", ""),
         "similarity": hit.get("similarity", 0.0),
+        "vector_similarity": hit.get("vector_similarity", hit.get("similarity", 0.0)),
+        "match_reasons": hit.get("match_reasons", []),
         "pipeline_id": meta.get("pipeline_id", ""),
     }
 
@@ -355,27 +359,38 @@ async def search_memory_node(state: AgentState) -> dict:
     Formats results with relative timestamps so Claude can cite them naturally.
     """
     query = state["query"]
-    events: list[dict] = [{"type": "node_start", "node": "search_memory", "message": "Searching incident memory..."}]
+    events: list[dict] = [{"type": "node_start", "node": "search_memory", "message": "Gathering evidence & incident memory..."}]
 
-    # Search ChromaDB for semantically similar incidents.
-    # Over-fetch, then drop the agent's own auto-analysis write-backs (status
-    # "analyzed") so recall surfaces curated/resolved incidents — not a near-
-    # identical echo of a previous run of the same query.
-    raw_hits = await chroma_store.search_similar(query, top_k=10)
-    chroma_hits = [h for h in raw_hits if (h.get("metadata") or {}).get("status") != "analyzed"][:3]
-    if not chroma_hits:  # nothing curated matched — fall back to whatever we found
-        chroma_hits = raw_hits[:3]
+    # Auto-gather the failing Jenkins build log for the job referenced in the
+    # query, so the agent starts grounded in real evidence and recall is enriched
+    # with the log text. The agent can still call fetch_jenkins_logs for others.
+    evidence = await _gather_jenkins_evidence(query)
+    if evidence.get("job"):
+        events.append({"type": "tool_call", "tool": "fetch_jenkins_logs",
+                       "message": f"Fetching Jenkins logs: {evidence['job']} #{evidence.get('build_number')}..."})
+        if evidence.get("logs"):
+            lines = len(evidence["logs"].splitlines())
+            events.append({"type": "tool_result", "tool": "fetch_jenkins_logs",
+                           "message": f"{evidence['job']} #{evidence.get('build_number')} ({evidence.get('result')}) -> {lines} log lines"})
+        else:
+            events.append({"type": "tool_result", "tool": "fetch_jenkins_logs",
+                           "message": f"{evidence['job']}: no log retrievable"})
 
-    # Search Neo4j using extracted keywords
-    keywords = _extract_keywords(query)
-    neo4j_results: list[dict] = []
-    for kw in keywords[:3]:
-        r = await neo4j_store.find_similar_errors(kw)
-        if r.get("records"):
-            neo4j_results.extend(r["records"])
+    search_query = query
+    if evidence.get("logs"):
+        search_query = f"{query}\n{evidence['logs'][:800]}"
+
+    # Stage 1+2: wide ChromaDB recall → weighted re-rank (cosine + field
+    # agreement + recency), write-backs excluded. Blends "reads the same" with
+    # "is the same kind of failure" and yields match_reasons for the UI.
+    chroma_hits = await rerank.recall(search_query, context=state.get("context"), top_k=3)
 
     # Build rich match objects
     memory_matches = [_build_memory_match(h) for h in chroma_hits]
+
+    # GraphRAG: expand from the matched incidents through the Neo4j error/fix
+    # graph (error type → proven fixes → sibling incidents on other pipelines).
+    graph_ctx = await graphrag.build_graph_context(memory_matches, query)
 
     # Build the memory context string injected into the system prompt
     memory_parts: list[str] = []
@@ -383,34 +398,26 @@ async def search_memory_node(state: AgentState) -> dict:
         memory_parts.append("=== INCIDENT MEMORY (pre-loaded, cite these if relevant) ===")
         for m in memory_matches:
             sim_pct = int(m["similarity"] * 100)
+            why = f" | {', '.join(m['match_reasons'])}" if m.get("match_reasons") else ""
             memory_parts.append(
-                f"• [{m['id']}] {m['time_ago']} | similarity={sim_pct}%\n"
+                f"• [{m['id']}] {m['time_ago']} | match={sim_pct}%{why}\n"
                 f"  root_cause: {m['root_cause'][:150]}\n"
                 f"  fix: {m['fix'][:150]}"
             )
 
-    if neo4j_results:
-        memory_parts.append("\n=== GRAPH KNOWLEDGE (Neo4j error patterns) ===")
-        seen: set[str] = set()
-        for r in neo4j_results[:5]:
-            et = r.get("error_type", "")
-            if et in seen:
-                continue
-            seen.add(et)
-            fixes = r.get("fixes", [])
-            count = r.get("occurrence_count", 0)
-            memory_parts.append(
-                f"• error_type={et} | {count} incident(s) | fixes: {'; '.join(fixes[:2])}"
-            )
+    if graph_ctx.get("text"):
+        memory_parts.append("\n" + graph_ctx["text"])
 
     memory_context = "\n".join(memory_parts)
 
+    graph_entities = graph_ctx.get("entities") or {}
     best_match = memory_matches[0] if memory_matches and memory_matches[0]["similarity"] >= MEMORY_MATCH_THRESHOLD else None
     events.append({
         "type": "memory_results",
         "chroma_hits": len(chroma_hits),
-        "neo4j_patterns": len(neo4j_results),
+        "neo4j_patterns": len(graph_entities.get("error_types", [])),
         "best_match": best_match,
+        "graph_entities": graph_entities or None,
         "similar_incident_ids": [m["id"] for m in memory_matches],
         "message": (
             f"Found strong match: {best_match['id']} ({best_match['time_ago']})"
@@ -423,43 +430,57 @@ async def search_memory_node(state: AgentState) -> dict:
         "memory_hits": chroma_hits,
         "memory_matches": memory_matches,
         "memory_context": memory_context,
+        "evidence": evidence,
         "events": events,
     }
 
 
 async def call_claude_node(state: AgentState) -> dict:
-    """Call Claude API with streaming — yields text_delta events per token."""
-    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    """One agent turn via the provider-agnostic LLM layer (Azure or Anthropic).
 
+    Emits text as text_delta events and returns the normalized LLMTurn for
+    routing. Message history is kept in neutral format so it replays to either
+    provider across tool-loop iterations.
+    """
     system = DEEP_RESEARCH_PROMPT if state.get("mode") == "research" else SYSTEM_PROMPT
     if state.get("memory_context"):
         system += f"\n\n{state['memory_context']}"
 
     messages = list(state.get("messages", []))
     if not messages:
-        context_str = json.dumps(state.get("context", {}))
-        messages = [{"role": "user", "content": f"Query: {state['query']}\nContext: {context_str}"}]
+        # Build the opening user turn, grounding it with the pre-fetched build log.
+        parts = [f"Query: {state['query']}"]
+        ctx = state.get("context", {})
+        if ctx:
+            parts.append(f"Context: {json.dumps(ctx)}")
+        evidence = state.get("evidence", {})
+        if evidence.get("logs"):
+            parts.append(
+                f"=== JENKINS BUILD LOG — {evidence['job']} #{evidence.get('build_number')} "
+                f"(result: {evidence.get('result')}) ===\n{evidence['logs'][:6000]}"
+            )
+            parts.append(
+                "Diagnose the specific root cause from the build log above. Quote the exact "
+                "failing line(s). Be concrete and confident; the logs are provided, so do NOT "
+                "ask for more. If incident memory contains a match, cite it."
+            )
+        messages = [{"role": "user", "content": "\n\n".join(parts)}]
 
-    events: list[dict] = [{"type": "node_start", "node": "call_claude", "message": "Consulting AI..."}]
+    events: list[dict] = [{"type": "node_start", "node": "call_claude",
+                           "message": f"Consulting AI ({llm.provider_label()})..."}]
 
-    async with client.messages.stream(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        system=system,
-        tools=TOOL_SCHEMAS,
-        messages=messages,
-    ) as stream:
-        async for text in stream.text_stream:
-            if text:
-                events.append({"type": "text_delta", "text": text, "message": text})
-        response = await stream.get_final_message()
+    turn = await llm.run_turn(messages, system, TOOL_SCHEMAS, max_tokens=4096)
 
-    messages.append({"role": "assistant", "content": response.content})
+    for chunk in turn.text_chunks:
+        if chunk:
+            events.append({"type": "text_delta", "text": chunk, "message": chunk})
 
-    tool_names = [b.name for b in response.content if hasattr(b, "name") and b.type == "tool_use"]
+    messages.append(turn.assistant_message)
+
+    tool_names = [tc.name for tc in turn.tool_calls]
     events.append({
         "type": "claude_response",
-        "stop_reason": response.stop_reason,
+        "stop_reason": turn.stop_reason,
         "tool_calls": tool_names,
         "message": f"AI wants to call: {', '.join(tool_names)}" if tool_names else "AI is synthesizing...",
     })
@@ -467,47 +488,47 @@ async def call_claude_node(state: AgentState) -> dict:
     return {
         "messages": messages,
         "events": events,
-        "_claude_response": response,
+        "_claude_response": turn,
         "iteration": state.get("iteration", 0) + 1,
     }
 
 
 async def execute_tools_node(state: AgentState) -> dict:
-    """Execute all tool calls from the last Claude response."""
-    response = state["_claude_response"]
+    """Execute all tool calls from the last agent turn."""
+    turn = state["_claude_response"]
     messages = list(state["messages"])
     actions_taken: list[str] = []
     events: list[dict] = [{"type": "node_start", "node": "execute_tools", "message": "Executing tools..."}]
     tool_results = []
 
-    for block in response.content:
-        if block.type != "tool_use":
-            continue
-
-        tool_fn = TOOL_MAP.get(block.name)
+    for tc in turn.tool_calls:
+        tool_fn = TOOL_MAP.get(tc.name)
         events.append({
             "type": "tool_call",
-            "tool": block.name,
-            "args": block.input,
-            "message": f"Calling {block.name}...",
+            "tool": tc.name,
+            "args": tc.input,
+            "message": f"Calling {tc.name}...",
         })
 
         if tool_fn:
-            result = await tool_fn(**block.input)
-            actions_taken.append(f"{block.name}({json.dumps(block.input)[:60]})")
+            try:
+                result = await tool_fn(**tc.input)
+            except Exception as exc:  # bad args from the model shouldn't kill the loop
+                result = {"error": f"{tc.name} failed: {exc}"}
+            actions_taken.append(f"{tc.name}({json.dumps(tc.input)[:60]})")
         else:
-            result = {"error": f"Unknown tool: {block.name}"}
+            result = {"error": f"Unknown tool: {tc.name}"}
 
-        summary = _summarize_tool_result(block.name, result)
+        summary = _summarize_tool_result(tc.name, result)
         events.append({
             "type": "tool_result",
-            "tool": block.name,
+            "tool": tc.name,
             "summary": summary,
-            "message": f"{block.name} → {summary}",
+            "message": f"{tc.name} -> {summary}",
         })
         tool_results.append({
             "type": "tool_result",
-            "tool_use_id": block.id,
+            "tool_use_id": tc.id,
             "content": json.dumps(result)[:8000],
         })
 
@@ -521,17 +542,12 @@ async def synthesize_node(state: AgentState) -> dict:
     Parse Claude's final response into the structured result.
     Merges memory_matches from the pre-flight search into the output.
     """
-    response = state["_claude_response"]
+    turn = state["_claude_response"]
     actions_taken = state.get("actions_taken", [])
     memory_matches = state.get("memory_matches", [])
     events: list[dict] = [{"type": "node_start", "node": "synthesize", "message": "Synthesizing result..."}]
 
-    result: dict | None = None
-    for block in response.content:
-        if hasattr(block, "text"):
-            result = _extract_json(block.text)
-            if result:
-                break
+    result: dict | None = _extract_json(turn.text or "")
 
     if not result:
         # Build a best-effort result from memory alone
@@ -554,11 +570,11 @@ async def synthesize_node(state: AgentState) -> dict:
     result["actions_taken"] = list(dict.fromkeys(result["actions_taken"] + actions_taken))
     result.setdefault("similar_incidents", [m["id"] for m in memory_matches])
 
-    # Ensure memory_match is populated even when Claude omitted it
-    if "memory_match" not in result and memory_matches:
-        best = memory_matches[0]
-        if best["similarity"] >= MEMORY_MATCH_THRESHOLD:
-            result["memory_match"] = best
+    # The real ChromaDB match is authoritative for id/similarity/time_ago — the
+    # model often echoes a memory_match with no real similarity (renders as
+    # "0% similar" in the UI), so override it with the pre-flight top match.
+    if memory_matches and memory_matches[0]["similarity"] >= MEMORY_MATCH_THRESHOLD:
+        result["memory_match"] = memory_matches[0]
 
     # Attach full memory_matches list for the UI cards
     result["memory_matches"] = memory_matches
@@ -588,6 +604,7 @@ async def memory_writer_node(state: AgentState) -> dict:
     result = state.get("result", {})
     query = state.get("query", "")
     context = state.get("context", {})
+    evidence = state.get("evidence", {})
     events: list[dict] = [{"type": "node_start", "node": "memory_writer", "message": "Storing to memory..."}]
 
     root_cause = result.get("root_cause", "")
@@ -599,9 +616,10 @@ async def memory_writer_node(state: AgentState) -> dict:
 
     incident_id = f"aeon_{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow().isoformat() + "Z"
-    error_type = context.get("error_type", "ai_analysis")
-    pipeline_id = context.get("pipeline_id", "unknown")
-    logs = context.get("logs", "")
+    # Prefer the auto-gathered evidence's job/log when the caller gave no context.
+    error_type = context.get("error_type") or ("build_failure" if evidence.get("logs") else "ai_analysis")
+    pipeline_id = context.get("pipeline_id") or evidence.get("job") or "unknown"
+    logs = context.get("logs") or evidence.get("logs", "")
 
     chroma_ok = await chroma_store.store_incident(
         incident_id=incident_id,
@@ -747,14 +765,12 @@ _MOCK_RESEARCH_RESULT = {
 
 
 # ---------------------------------------------------------------------------
-# Single-shot path (Azure OpenAI / any non-Anthropic provider)
+# Agent helpers (shared by the LangGraph nodes on both providers)
 # ---------------------------------------------------------------------------
-# The full LangGraph tool-use loop is Anthropic-specific (streaming + Anthropic
-# tool schemas). When Azure OpenAI is the active provider we run a leaner but
-# fully live flow: real memory search → one memory-grounded LLM call → the same
-# structured JSON → memory write-back. Query-aware and grounded in incident
-# memory — exactly the demo story — without porting the tool loop to a second
-# provider's function-calling format.
+# The tool-calling loop runs on Azure OR Anthropic via llm.run_turn. These
+# helpers build a best-effort result from incident memory when the model returns
+# no JSON, fold the real memory match into the result, and auto-gather the
+# failing Jenkins build log so the agent starts grounded in real evidence.
 
 def _memory_fallback_result(memory_matches: list, mode: str = "quick") -> dict:
     """Build a result from incident memory alone when the LLM returns no JSON."""
@@ -845,156 +861,43 @@ async def _gather_jenkins_evidence(query: str) -> dict:
     }
 
 
-async def _prepare_single_shot(query: str, evidence: dict) -> dict:
-    """Run memory search, enriched with build-log text when we have it."""
-    search_query = query
-    if evidence.get("logs"):
-        search_query = f"{query}\n{evidence['logs'][:800]}"
-    return await search_memory_node({"query": search_query})
-
-
-def _compose_single_shot_prompt(query: str, context: dict, evidence: dict, mem: dict, mode: str) -> tuple[str, str]:
-    system = DEEP_RESEARCH_PROMPT if mode == "research" else SYSTEM_PROMPT
-    if mem.get("memory_context"):
-        system += f"\n\n{mem['memory_context']}"
-
-    parts = [f"Query: {query}"]
-    if context:
-        parts.append(f"Context: {json.dumps(context)}")
-    if evidence.get("logs"):
-        parts.append(
-            f"=== JENKINS BUILD LOG — {evidence['job']} #{evidence.get('build_number')} "
-            f"(result: {evidence.get('result')}) ===\n{evidence['logs'][:6000]}"
-        )
-        parts.append(
-            "Diagnose the specific root cause from the build log above. Quote the exact failing "
-            "line(s). Be concrete and confident; do NOT ask for more logs — they are provided. "
-            "If incident memory contains a match, cite it."
-        )
-    elif evidence.get("job"):
-        parts.append(f"(Jenkins job '{evidence['job']}' was matched but its log was unavailable.)")
-    return system, "\n\n".join(parts)
-
-
-def _evidence_context(context: dict, evidence: dict) -> dict:
-    """Attach the matched pipeline id + logs so memory_writer stores something useful."""
-    if not evidence.get("job"):
-        return context
-    ctx = dict(context)
-    ctx.setdefault("pipeline_id", evidence["job"])
-    ctx.setdefault("logs", evidence.get("logs", ""))
-    return ctx
-
-
-async def _single_shot_result(query: str, context: dict, mode: str) -> dict:
-    evidence = await _gather_jenkins_evidence(query)
-    mem = await _prepare_single_shot(query, evidence)
-    memory_matches = mem.get("memory_matches", [])
-
-    system, user = _compose_single_shot_prompt(query, context, evidence, mem, mode)
-    text = await llm.complete(system=system, user=user, max_tokens=4096)
-    result = _extract_json(text or "") or _memory_fallback_result(memory_matches, mode)
-    _merge_memory(result, memory_matches)
-
-    await memory_writer_node({"result": result, "query": query, "context": _evidence_context(context, evidence)})
-    return result
-
-
-async def _single_shot_stream(query: str, context: dict, mode: str) -> AsyncIterator[dict[str, Any]]:
-    yield {"type": "node_start", "node": "search_memory", "message": "Gathering evidence & incident memory..."}
-
-    evidence = await _gather_jenkins_evidence(query)
-    if evidence.get("job"):
-        yield {"type": "tool_call", "tool": "fetch_jenkins_logs", "message": f"Fetching Jenkins logs: {evidence['job']} #{evidence.get('build_number')}..."}
-        if evidence.get("logs"):
-            lines = len(evidence["logs"].splitlines())
-            yield {"type": "tool_result", "tool": "fetch_jenkins_logs", "message": f"{evidence['job']} #{evidence.get('build_number')} ({evidence.get('result')}) → {lines} log lines"}
-        else:
-            yield {"type": "tool_result", "tool": "fetch_jenkins_logs", "message": f"{evidence['job']}: no log retrievable"}
-
-    mem = await _prepare_single_shot(query, evidence)
-    for ev in mem.get("events", []):
-        if ev.get("type") == "memory_results":
-            yield ev
-    memory_matches = mem.get("memory_matches", [])
-
-    system, user = _compose_single_shot_prompt(query, context, evidence, mem, mode)
-    yield {"type": "node_start", "node": "call_claude", "message": f"Consulting AI ({llm.provider_label()})..."}
-    text = await llm.complete(system=system, user=user, max_tokens=4096)
-    result = _extract_json(text or "") or _memory_fallback_result(memory_matches, mode)
-    _merge_memory(result, memory_matches)
-
-    narrative = result.get("executive_summary") or result.get("root_cause") or ""
-    for word in narrative.split():
-        yield {"type": "text_delta", "text": word + " ", "message": word + " "}
-
-    yield {"type": "claude_response", "stop_reason": "end_turn", "tool_calls": [], "message": "AI is synthesizing..."}
-    yield {"type": "node_start", "node": "synthesize", "message": "Synthesizing result..."}
-    yield {"type": "result", "content": result, "message": "Analysis complete."}
-    if result.get("memory_match"):
-        m = result["memory_match"]
-        yield {
-            "type": "memory_match_found",
-            "incident_id": m.get("id"),
-            "time_ago": m.get("time_ago"),
-            "message": f"Matched incident {m.get('id')} from {m.get('time_ago')}",
-        }
-
-    w = await memory_writer_node({"result": result, "query": query, "context": _evidence_context(context, evidence)})
-    for ev in w.get("events", []):
-        yield ev
+def _initial_state(query: str, context: dict, mode: str) -> "AgentState":
+    return {
+        "query": query,
+        "context": context,
+        "mode": mode,
+        "messages": [],
+        "memory_context": "",
+        "memory_hits": [],
+        "memory_matches": [],
+        "evidence": {},
+        "actions_taken": [],
+        "events": [],
+        "result": {},
+        "iteration": 0,
+        "_claude_response": None,
+    }
 
 
 async def run_graph(query: str, context: dict = {}, mode: str = "quick") -> dict[str, Any]:
-    """Run the agent and return the structured result.
+    """Run the LangGraph tool-calling agent and return the structured result.
 
-    Provider routing:  Azure (single-shot) → Anthropic (LangGraph tool loop) → mock.
+    The agent runs on whichever provider llm.active_provider() selects (Azure or
+    Anthropic) via the provider-agnostic run_turn; with no provider, returns mock.
     """
     mock = _MOCK_RESEARCH_RESULT if mode == "research" else _MOCK_RESULT
     if not llm.llm_available():
         return mock
-
-    # Azure / any non-Anthropic provider → single-shot memory-grounded analysis
-    if llm.active_provider() != "anthropic":
-        try:
-            return await _single_shot_result(query, context, mode)
-        except Exception as exc:
-            return {**mock, "error": str(exc)}
-
-    # Anthropic → full LangGraph tool-use agent
     try:
-        initial: AgentState = {
-            "query": query,
-            "context": context,
-            "mode": mode,
-            "messages": [],
-            "memory_context": "",
-            "memory_hits": [],
-            "memory_matches": [],
-            "actions_taken": [],
-            "events": [],
-            "result": {},
-            "iteration": 0,
-            "_claude_response": None,
-        }
-        final = await get_graph().ainvoke(initial)
+        final = await get_graph().ainvoke(_initial_state(query, context, mode))
         return final.get("result") or mock
     except Exception as exc:
         return {**mock, "error": str(exc)}
 
 
 async def stream_graph(query: str, context: dict = {}, mode: str = "quick") -> AsyncIterator[dict[str, Any]]:
-    """Stream LangGraph node events as they happen. Yields dicts for SSE."""
+    """Stream agent node events as they happen. Yields dicts for SSE."""
     mock_result = _MOCK_RESEARCH_RESULT if mode == "research" else _MOCK_RESULT
-
-    # Azure / any non-Anthropic provider → single-shot memory-grounded stream
-    if llm.llm_available() and llm.active_provider() != "anthropic":
-        try:
-            async for ev in _single_shot_stream(query, context, mode):
-                yield ev
-        except Exception as exc:
-            yield {"type": "error", "message": str(exc)}
-        return
 
     if not llm.llm_available():
         yield {"type": "node_start", "node": "search_memory", "message": "Searching incident memory..."}
@@ -1015,21 +918,7 @@ async def stream_graph(query: str, context: dict = {}, mode: str = "quick") -> A
         return
 
     try:
-        initial: AgentState = {
-            "query": query,
-            "context": context,
-            "mode": mode,
-            "messages": [],
-            "memory_context": "",
-            "memory_hits": [],
-            "memory_matches": [],
-            "actions_taken": [],
-            "events": [],
-            "result": {},
-            "iteration": 0,
-            "_claude_response": None,
-        }
-        async for chunk in get_graph().astream(initial, stream_mode="updates"):
+        async for chunk in get_graph().astream(_initial_state(query, context, mode), stream_mode="updates"):
             for _node_name, node_output in chunk.items():
                 for event in node_output.get("events", []):
                     yield event

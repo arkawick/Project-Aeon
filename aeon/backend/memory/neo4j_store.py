@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 from typing import Any
 
@@ -9,9 +10,12 @@ class Neo4jStore:
         self.user = os.getenv("NEO4J_USER", "neo4j")
         self.password = os.getenv("NEO4J_PASSWORD", "aeon_neo4j")
         self.driver = None
+        self._last_connect_attempt = 0.0
+        self._reconnect_cooldown = 5.0  # seconds between reconnect attempts
         self._connect()
 
     def _connect(self):
+        self._last_connect_attempt = time.monotonic()
         try:
             from neo4j import GraphDatabase
 
@@ -23,6 +27,18 @@ class Neo4jStore:
         except Exception as exc:
             print(f"[Neo4jStore] Connection failed: {exc}. Running in no-op mode.")
             self.driver = None
+
+    def _ensure_driver(self) -> bool:
+        """Self-heal the cold-start race: if the driver never came up (Neo4j's
+        bolt port lagged the backend at boot), retry the connection here instead
+        of no-op'ing for the rest of the process life. Throttled so a genuinely
+        down Neo4j isn't hammered on every call. Returns True if usable."""
+        if self.driver is not None:
+            return True
+        if time.monotonic() - self._last_connect_attempt < self._reconnect_cooldown:
+            return False
+        self._connect()
+        return self.driver is not None
 
     # ------------------------------------------------------------------
     # Sync helpers (run inside asyncio.to_thread)
@@ -168,7 +184,7 @@ class Neo4jStore:
         fix_description: str,
         severity: str = "medium",
     ) -> bool:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return False
         try:
             return await asyncio.to_thread(
@@ -180,7 +196,7 @@ class Neo4jStore:
             return False
 
     async def find_similar_errors(self, error_type: str) -> dict[str, Any]:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return {"error_type": error_type, "records": []}
         try:
             return await asyncio.to_thread(self._sync_find_similar_errors, error_type)
@@ -189,7 +205,7 @@ class Neo4jStore:
             return {"error_type": error_type, "records": []}
 
     async def get_error_fix_history(self, error_type: str) -> list[dict[str, Any]]:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return []
         try:
             return await asyncio.to_thread(self._sync_get_error_fix_history, error_type)
@@ -198,7 +214,7 @@ class Neo4jStore:
             return []
 
     async def get_incident_graph(self, incident_id: str) -> dict[str, Any]:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return {"nodes": [], "edges": []}
         try:
             return await asyncio.to_thread(self._sync_get_incident_graph, incident_id)
@@ -207,7 +223,7 @@ class Neo4jStore:
             return {"nodes": [], "edges": []}
 
     async def get_full_graph(self) -> dict[str, Any]:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return {"nodes": [], "edges": []}
         try:
             return await asyncio.to_thread(self._sync_get_full_graph)
@@ -216,7 +232,7 @@ class Neo4jStore:
             return {"nodes": [], "edges": []}
 
     async def get_top_errors(self, limit: int = 10) -> list[dict[str, Any]]:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return []
         try:
             return await asyncio.to_thread(self._sync_get_top_errors, limit)
@@ -289,7 +305,7 @@ class Neo4jStore:
     async def store_provenance_graph(
         self, repo: str, file_path: str, nodes: list[dict], edges: list[dict]
     ) -> bool:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return False
         try:
             return await asyncio.to_thread(
@@ -300,7 +316,7 @@ class Neo4jStore:
             return False
 
     async def get_provenance_graph(self, repo: str, file_path: str) -> dict:
-        if self.driver is None:
+        if self.driver is None and not await asyncio.to_thread(self._ensure_driver):
             return {"nodes": [], "edges": [], "cached": False}
         try:
             return await asyncio.to_thread(self._sync_get_provenance_graph, repo, file_path)

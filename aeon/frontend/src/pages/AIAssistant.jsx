@@ -77,6 +77,13 @@ function MemoryMatchCard({ match }) {
         <span className="text-indigo-300 font-mono">{match.id}</span>
         {match.time_ago && <span className="text-slate-500 ml-2">· {match.time_ago}</span>}
       </p>
+      {match.match_reasons?.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1.5">
+          {match.match_reasons.map((r, i) => (
+            <span key={i} className="text-[10px] text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 px-1.5 py-0.5 rounded">{r}</span>
+          ))}
+        </div>
+      )}
       {match.root_cause && <p className="text-slate-400 text-xs mt-1 line-clamp-2">{match.root_cause}</p>}
       {match.fix && <p className="text-green-400 text-xs mt-1 font-mono line-clamp-1">→ {match.fix}</p>}
     </div>

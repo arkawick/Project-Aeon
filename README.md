@@ -84,7 +84,7 @@ AI risk assessment: HIGH / MEDIUM / LOW
 | **AI Assistant** | Streaming LangGraph agent with live tool call log, confidence scores, memory match cards |
 | **Deep Research mode** | 15-iteration exhaustive investigation — contributing factors, impact, action items |
 | **Post-mortem generator** | One-click incident post-mortem report, copy or download as `.md` |
-| **Incident Memory** | ChromaDB semantic search + Neo4j graph relationships across all past incidents |
+| **Incident Memory** | Two-stage retrieval — ChromaDB vector recall → weighted re-rank (cosine + field agreement + recency) with "why it matched" reasons, then **GraphRAG** expansion through Neo4j (error type → proven fixes → sibling incidents) injected into the agent's prompt |
 | **Knowledge Graph** | Force-directed Neo4j visualization — incident → error type → fix relationships |
 | **Code Provenance** | Trace any file's full history: commits → PRs → issues, per-node AI reasoning, real diffs, timeline layout |
 | **Blast Radius** | Map what breaks when a PR merges: files → services, AI risk level + deploy recommendation |
@@ -106,7 +106,8 @@ AI risk assessment: HIGH / MEDIUM / LOW
       GitHub API       Jenkins API        n8n Webhooks
           │                 │
           │        LangGraph Agent
-          │       (Claude Sonnet 4.6)
+          │   (Azure OpenAI or Claude —
+          │    provider-agnostic layer)
           │         8 tools · astream()
           │                 │
           │     ┌───────────┴───────────┐
@@ -127,11 +128,12 @@ provenance_service.py     blast_radius_service.py
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI (Python 3.12) |
-| LLM | Claude API (`claude-sonnet-4-6`) via AsyncAnthropic streaming |
-| Agent | LangGraph — StateGraph, `astream()`, 8 tools |
+| Backend | FastAPI (Python 3.11) |
+| LLM | **Provider-agnostic** (`core/llm.py`): Azure OpenAI (`gpt-5-mini`) **or** Claude (`claude-sonnet-4-6`) — auto-detected, tool-calling on both, falls back to mock |
+| Agent | LangGraph — StateGraph, `astream()`, 8 tools, provider-agnostic `run_turn()` |
+| Retrieval | Two-stage: ChromaDB vector recall → weighted re-rank + GraphRAG graph expansion |
 | Vector Memory | ChromaDB |
-| Graph Memory | Neo4j |
+| Graph Memory | Neo4j (self-healing connection) |
 | Structured DB | PostgreSQL |
 | Cache | Redis |
 | Frontend | React 18 + Vite + Tailwind CSS (Fira Code theme) |
@@ -144,7 +146,7 @@ provenance_service.py     blast_radius_service.py
 
 ## Quick Start
 
-**Prerequisites:** Docker Desktop, an Anthropic API key.
+**Prerequisites:** Docker Desktop. An LLM key (Azure OpenAI **or** Anthropic) is optional — every AI surface falls back to mock output without one.
 
 ```bash
 # 1. Clone
@@ -153,14 +155,17 @@ cd Project-Aeon
 
 # 2. Configure
 cp aeon/backend/.env.example aeon/backend/.env
-# Edit aeon/backend/.env — set ANTHROPIC_API_KEY and GITHUB_TOKEN
+# Edit aeon/backend/.env — set GITHUB_TOKEN and ONE of:
+#   AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY   (Azure wins if both set)
+#   ANTHROPIC_API_KEY
 
 # 3. Start
 cd aeon
 docker compose up -d
 
-# 4. Seed demo data
+# 4. Seed demo data (5 incidents + inc_demo_421 for Blast Radius recall)
 curl -X POST http://localhost:8000/api/memory/seed
+# or, from the repo root:  .\reseed.ps1
 
 # 5. Open
 # http://localhost:3000
@@ -170,12 +175,22 @@ curl -X POST http://localhost:8000/api/memory/seed
 
 ## Environment Variables
 
+The LLM layer auto-detects a provider: if `AZURE_OPENAI_*` is set it wins, else `ANTHROPIC_API_KEY`, else mock. Set `LLM_PROVIDER=azure|anthropic|mock` to force one.
+
 ```env
-ANTHROPIC_API_KEY=sk-ant-...   # Required for AI features
+# --- LLM provider (pick one; Azure takes priority if both are set) ---
+# Azure OpenAI — AZURE_OPENAI_ENDPOINT is the FULL chat-completions URL
+AZURE_OPENAI_ENDPOINT=https://<gateway>/deployments/gpt-5-mini/chat/completions?api-version=2024-12-01-preview
+AZURE_OPENAI_DEPLOYMENT=gpt-5-mini
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+AZURE_OPENAI_API_KEY=...
+# ...or Anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
 GITHUB_TOKEN=ghp_...           # Required for Code Provenance + Blast Radius
 ```
 
-After editing `.env`:
+After editing `.env` (env changes need a recreate, not a restart):
 ```bash
 docker compose up -d backend
 ```
@@ -215,7 +230,7 @@ tools = [
 search_memory → call_claude → execute_tools (loop, up to 15×) → synthesize → memory_writer
 ```
 
-Every analysis is automatically written back to ChromaDB + Neo4j so the agent improves over time.
+The loop is **provider-agnostic** — `search_memory` also auto-fetches the failing Jenkins log to ground the first turn, and `call_claude` runs `llm.run_turn()`, which does real tool-calling on **either** Azure OpenAI or Anthropic (neutral Anthropic-shaped messages/tools are translated to OpenAI format for Azure). Every analysis is automatically written back to ChromaDB + Neo4j so the agent improves over time.
 
 ---
 
@@ -230,9 +245,13 @@ Project-Aeon/
 │   │   │   ├── provenance.py        ← Code Provenance API
 │   │   │   └── blast_radius.py      ← Blast Radius API
 │   │   ├── agents/                  LangGraph graph + 8 tools
-│   │   ├── core/                    Shared singletons
-│   │   ├── memory/                  ChromaDB + Neo4j stores
+│   │   ├── core/
+│   │   │   ├── instances.py         Shared singletons
+│   │   │   └── llm.py               ← Provider-agnostic LLM (Azure/Anthropic/mock)
+│   │   ├── memory/                  ChromaDB + Neo4j (self-healing) stores
 │   │   └── services/
+│   │       ├── rerank.py                ← Two-stage retrieval re-rank
+│   │       ├── graphrag.py              ← GraphRAG graph expansion
 │   │       ├── provenance_service.py    ← GitHub trace + AI narrative
 │   │       └── blast_radius_service.py  ← PR classifier + AI risk
 │   ├── frontend/src/
@@ -248,6 +267,7 @@ Project-Aeon/
 ├── jenkins-setup/                   10 Jenkinsfile demos + seed script
 ├── github-actions-setup/            10 workflow YAMLs + setup script
 ├── n8n-setup/                       10 workflow JSONs
+├── reseed.ps1                       Restore demo memory after a volume wipe
 ├── AEON_README.md                   Full technical reference
 └── DEMO.md                          90-second demo runbook
 ```
@@ -257,8 +277,11 @@ Project-Aeon/
 ## Key Design Decisions
 
 - **`core/instances.py`** — shared singletons, no duplicate DB connections per request
+- **Provider-agnostic LLM (`core/llm.py`)** — Azure OpenAI → Anthropic → mock, chosen at runtime; `run_turn()` gives the agent real tool-calling on both providers, `complete()` serves the single-shot surfaces (blast/provenance/co-change/post-mortem)
+- **Two-stage retrieval + GraphRAG** — vector recall is re-ranked by field agreement + recency (`services/rerank.py`), then expanded through the incident graph (`services/graphrag.py`) so the model reasons over relationships, not just vector hits
 - **SSE everywhere** — AI Assistant, Code Provenance, and Blast Radius all stream progress live; the UI never blocks
-- **`memory_writer_node`** — every analysis auto-stored; the agent gets smarter with every run
+- **`memory_writer_node`** — every analysis auto-stored; the agent gets smarter with every run (write-backs are excluded from grounding recall so it never cites its own past output)
 - **Human-in-the-loop PRs** — issues auto-create, PRs require explicit approval click
+- **Resilient by design** — Neo4j self-heals the cold-start race (`_ensure_driver`, throttled reconnect); ChromaDB persists to `/data` so memory survives restarts; `reseed.ps1` restores demo memory after a `down -v`
 - **`originalGraph` ref pattern** — ForceGraph2D mutates node objects in place; storing immutable server data separately prevents ghost traces on layout switch
 - **Mock fallback everywhere** — full demo works without any external API tokens
