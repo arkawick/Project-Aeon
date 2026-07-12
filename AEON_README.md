@@ -150,7 +150,8 @@ Project-Aeon/
 │   │   ├── api/              REST endpoints
 │   │   │   ├── pipelines.py, incidents.py, ai.py, memory.py
 │   │   │   ├── provenance.py      ← Code Provenance API
-│   │   │   └── blast_radius.py    ← Blast Radius API
+│   │   │   ├── blast_radius.py    ← Blast Radius API
+│   │   │   └── predict.py         ← Predictive Merge Gate API
 │   │   ├── agents/           LangGraph graph + 8 tools
 │   │   ├── core/
 │   │   │   ├── instances.py  shared singletons
@@ -160,21 +161,24 @@ Project-Aeon/
 │   │       ├── rerank.py                ← Two-stage retrieval re-rank
 │   │       ├── graphrag.py              ← GraphRAG graph expansion
 │   │       ├── provenance_service.py   ← GitHub trace + AI narrative
-│   │       └── blast_radius_service.py ← PR impact classifier + AI risk
+│   │       ├── blast_radius_service.py ← PR impact classifier + AI risk
+│   │       └── predict_service.py      ← Merge Gate signal fusion
 │   ├── frontend/
 │   │   └── src/
 │   │       ├── pages/
 │   │       │   ├── Dashboard, AIAssistant, Pipelines, Incidents, Workflows
 │   │       │   ├── GraphView.jsx      ← Knowledge Graph
 │   │       │   ├── Provenance.jsx     ← Code Provenance
-│   │       │   └── BlastRadius.jsx    ← Blast Radius
+│   │       │   ├── BlastRadius.jsx    ← Blast Radius
+│   │       │   └── Predict.jsx        ← Predictive Merge Gate
 │   │       ├── components/   Sidebar, EventLog, MemoryMatchCard, ActionPanel
 │   │       └── lib/          api.js (axios + EventSource clients)
 │   ├── jenkins/              Dockerfile + init.groovy.d
 │   ├── n8n/                  Workflow definitions
 │   ├── docker-compose.yml
 │   ├── CODE_PROVENANCE.md    ← Code Provenance feature guide
-│   └── BLAST_RADIUS.md       ← Blast Radius feature guide
+│   ├── BLAST_RADIUS.md       ← Blast Radius feature guide
+│   └── MERGE_GATE.md         ← Predictive Merge Gate feature guide
 ├── jenkins-setup/
 │   ├── jobs/                 10 Jenkinsfile demos
 │   ├── create_jobs.py
@@ -203,6 +207,7 @@ Project-Aeon/
 | Knowledge Graph | `/graph` | Force-directed Neo4j visualization — incident patterns |
 | Code Provenance | `/provenance` | Trace why any file is the way it is: commits → PRs → issues + AI narrative |
 | Blast Radius | `/blast` | Map what breaks if a PR merges: files → services → AI risk assessment |
+| Merge Gate | `/predict` | Forecast if a PR's build will fail before it runs — memory + hanging points + PR shape + live CI → PASS/CAUTION/BLOCK |
 
 ---
 
@@ -219,6 +224,11 @@ Given any GitHub PR, classifies every changed file (Service / Test / Config / Pi
 → Full guide: `aeon/BLAST_RADIUS.md`
 
 → Best demo PR: `expressjs/express` #7233 (dependency upgrade touching 4 categories)
+
+### Predictive Merge Gate (`/predict`)
+Forecasts whether a PR's build will fail **before** it runs — no build, just history + live CI. Fuses four signals: incident-memory resemblance to past failures, **hanging points** (targeted per-file co-change — a file changed without a partner it historically changes with), PR shape (source without tests, big diff, dep/lockfile churn), and high-risk file classes. The PR's **existing CI check-runs** act as a ground-truth prior (a failing check forces a high-confidence BLOCK; all-green dampens the estimate). Output: a fail-risk gauge, PASS/CAUTION/BLOCK verdict, confidence level, the specific hanging points, and a "run these before merge" checklist.
+
+→ Full guide: `aeon/MERGE_GATE.md`
 
 ### Knowledge Graph (`/graph`)
 Neo4j force-directed graph of all incident relationships — which error types recur, which pipelines share failures, which fixes resolved the same root cause across incidents.

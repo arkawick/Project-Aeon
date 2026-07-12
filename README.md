@@ -18,10 +18,12 @@ When a build fails, Aeon doesn't just show you the error. It:
 4. **Acts** — auto-creates GitHub issues, proposes PRs (with human-in-the-loop approval)
 5. **Learns** — writes every new analysis back to memory so the AI gets smarter over time
 
-And beyond incident response, two AI intelligence features answer the hardest questions in any codebase:
+And beyond incident response, a set of AI intelligence features answer the hardest questions in any codebase:
 
 - **"Why is this code the way it is?"** → Code Provenance: traces commits → PRs → issues with AI evolution narrative
 - **"What breaks if I merge this?"** → Blast Radius: maps every changed file to impacted services with AI risk assessment
+- **"Which files always change together?"** → Co-Change: mines git history for hidden coupling
+- **"Is this PR's build going to fail — before I run it?"** → Predictive Merge Gate: fuses incident memory, co-change hanging points, PR shape, and live CI state into a PASS/CAUTION/BLOCK forecast
 
 ---
 
@@ -75,6 +77,20 @@ AI risk assessment: HIGH / MEDIUM / LOW
 + deploy recommendation + "must verify" checklist
 ```
 
+### Predictive Merge Gate
+```
+Enter: public GitHub repo + PR number
+        ↓
+Fuse 4 signals + live CI state:
+  memory (resembles past failures) · hanging points (co-change violations)
+  · PR shape (tests/size/deps)     · risk file classes
+        ↓
+Ground truth: read the PR's existing CI check-runs
+        ↓
+Fail-risk gauge + PASS / CAUTION / BLOCK + confidence
++ hanging points + past incidents + "run these before merge"
+```
+
 ---
 
 ## Features
@@ -88,6 +104,7 @@ AI risk assessment: HIGH / MEDIUM / LOW
 | **Knowledge Graph** | Force-directed Neo4j visualization — incident → error type → fix relationships |
 | **Code Provenance** | Trace any file's full history: commits → PRs → issues, per-node AI reasoning, real diffs, timeline layout |
 | **Blast Radius** | Map what breaks when a PR merges: files → services, AI risk level + deploy recommendation |
+| **Predictive Merge Gate** | Forecast if a PR's build will fail *before* it runs — fuses incident memory + co-change hanging points + PR shape + live CI check state into a PASS/CAUTION/BLOCK verdict with confidence |
 | **Pipelines** | Unified GitHub Actions + Jenkins view, auto-refresh every 30s |
 | **Workflows** | n8n workflow triggers from the dashboard |
 | **Action Engine** | Auto GitHub issue creation; PR proposals with approve/reject UI |
@@ -243,7 +260,8 @@ Project-Aeon/
 │   │   ├── api/
 │   │   │   ├── pipelines.py, incidents.py, ai.py, memory.py
 │   │   │   ├── provenance.py        ← Code Provenance API
-│   │   │   └── blast_radius.py      ← Blast Radius API
+│   │   │   ├── blast_radius.py      ← Blast Radius API
+│   │   │   └── predict.py           ← Predictive Merge Gate API
 │   │   ├── agents/                  LangGraph graph + 8 tools
 │   │   ├── core/
 │   │   │   ├── instances.py         Shared singletons
@@ -253,17 +271,21 @@ Project-Aeon/
 │   │       ├── rerank.py                ← Two-stage retrieval re-rank
 │   │       ├── graphrag.py              ← GraphRAG graph expansion
 │   │       ├── provenance_service.py    ← GitHub trace + AI narrative
-│   │       └── blast_radius_service.py  ← PR classifier + AI risk
+│   │       ├── blast_radius_service.py  ← PR classifier + AI risk
+│   │       └── predict_service.py       ← Merge Gate signal fusion
 │   ├── frontend/src/
 │   │   ├── pages/
 │   │   │   ├── Dashboard, AIAssistant, Pipelines, Incidents, Workflows
 │   │   │   ├── GraphView.jsx        ← Knowledge Graph
 │   │   │   ├── Provenance.jsx       ← Code Provenance
-│   │   │   └── BlastRadius.jsx      ← Blast Radius
+│   │   │   ├── BlastRadius.jsx      ← Blast Radius
+│   │   │   └── Predict.jsx          ← Predictive Merge Gate
 │   │   └── components/Sidebar.jsx
 │   ├── docker-compose.yml
 │   ├── CODE_PROVENANCE.md           ← Code Provenance guide
-│   └── BLAST_RADIUS.md              ← Blast Radius guide
+│   ├── BLAST_RADIUS.md              ← Blast Radius guide
+│   ├── COCHANGE.md                  ← Co-Change guide
+│   └── MERGE_GATE.md                ← Predictive Merge Gate guide
 ├── jenkins-setup/                   10 Jenkinsfile demos + seed script
 ├── github-actions-setup/            10 workflow YAMLs + setup script
 ├── n8n-setup/                       10 workflow JSONs

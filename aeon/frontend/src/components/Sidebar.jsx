@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { getOdysseusStatus } from '../lib/api.js'
 import {
   LayoutDashboard, Bot, GitBranch, AlertTriangle,
-  Workflow, Network, Layers, Zap, Link2, Search, ExternalLink, Circle,
+  Workflow, Network, Layers, Zap, Link2, Search, ExternalLink, Circle, Gauge,
 } from 'lucide-react'
 
 const coreItems = [
@@ -19,6 +19,7 @@ const aiItems = [
   { to: '/provenance', label: 'Code Provenance', icon: Layers },
   { to: '/blast',      label: 'Blast Radius',    icon: Zap },
   { to: '/cochange',   label: 'Co-Change',       icon: Link2 },
+  { to: '/predict',    label: 'Merge Gate',      icon: Gauge },
 ]
 
 const ODYSSEUS_URL = 'http://localhost:7000'

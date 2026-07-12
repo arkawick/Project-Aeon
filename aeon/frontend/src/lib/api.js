@@ -138,6 +138,12 @@ export function streamCoChange(repo, commits = 100, filePath = '') {
   return new EventSource(url)
 }
 
+// Predictive Merge Gate
+export function streamPredict(repo, pr, commits = 60) {
+  const url = `/api/predict/stream?repo=${encodeURIComponent(repo)}&pr=${pr}&commits=${commits}`
+  return new EventSource(url)
+}
+
 export async function getCommitDiff(repo, sha) {
   const { data } = await api.get(`/provenance/diff?repo=${encodeURIComponent(repo)}&sha=${encodeURIComponent(sha)}`)
   return data

@@ -29,8 +29,9 @@ Backend and frontend mount source with hot reload — **backend picks up .py edi
 - `aeon/backend/memory/{chroma_store,neo4j_store}.py` — memory layer (both no-op gracefully when down; Neo4j self-heals — see gotcha)
 - `aeon/backend/services/rerank.py` + `graphrag.py` — two-stage retrieval re-rank + GraphRAG graph expansion (feed `search_memory`)
 - `aeon/backend/services/{blast_radius,provenance,cochange}_service.py` — the three graph features (SSE streaming)
+- `aeon/backend/services/predict_service.py` + `api/predict.py` — Predictive Merge Gate (`/predict`): fuses memory + targeted co-change hanging points + PR-shape + live CI check-runs into a PASS/CAUTION/BLOCK forecast (reuses blast's `_gh_get`/`_classify_file`/`_search_incident_memory`)
 - `reseed.ps1` — restore demo memory (6 incidents) after a `down -v`; `setup-new-pc.ps1` + `SETUP_NEW_PC.md` — tested one-shot machine bootstrap
-- Feature docs: `aeon/BLAST_RADIUS.md`, `aeon/CODE_PROVENANCE.md`, `aeon/COCHANGE.md`, `SETUP_GUIDE.md`
+- Feature docs: `aeon/BLAST_RADIUS.md`, `aeon/CODE_PROVENANCE.md`, `aeon/COCHANGE.md`, `aeon/MERGE_GATE.md`, `SETUP_GUIDE.md`
 
 ## Architecture rules
 
@@ -65,6 +66,7 @@ Backend and frontend mount source with hot reload — **backend picks up .py edi
 | Blast Radius `/blast` | `expressjs/express` PR `7233` |
 | Provenance `/provenance` | `expressjs/express` + `lib/application.js` (~2s with token) |
 | Co-Change `/cochange` | `expressjs/express`, 100 commits (finds ci.yml ↔ legacy.yml at 100%) |
+| Merge Gate `/predict` | `expressjs/express` PR `7233` → PASS 25% (merged PR, CI green → ground-truth override; 8 hanging points, resembles inc_demo_421). For a BLOCK/CAUTION beat use an OPEN PR whose CI hasn't passed. |
 
 **Guaranteed memory-recall moment:** Blast Radius recall on PR 7233 fires at ~0.78 on `inc_demo_421` (content-disposition / response.js / package.json). **This incident is now folded into the `/api/memory/seed` endpoint** (`api/memory.py` `SEED_INCIDENTS`), so a plain seed / `reseed.ps1` restores it — no manual re-store after a wipe.
 
