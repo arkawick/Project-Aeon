@@ -144,6 +144,16 @@ export function streamPredict(repo, pr, commits = 60) {
   return new EventSource(url)
 }
 
+export async function getPredictStats() {
+  const { data } = await api.get('/predict/stats')
+  return data
+}
+
+export async function postPredictToPr(repo, pr) {
+  const { data } = await api.post(`/predict/post?repo=${encodeURIComponent(repo)}&pr=${pr}`)
+  return data
+}
+
 export async function getCommitDiff(repo, sha) {
   const { data } = await api.get(`/provenance/diff?repo=${encodeURIComponent(repo)}&sha=${encodeURIComponent(sha)}`)
   return data

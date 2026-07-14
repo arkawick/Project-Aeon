@@ -67,6 +67,17 @@ async def ingest_pipeline_event(body: PipelineWebhookPayload) -> dict[str, Any]:
     if len(_INGESTED) > 100:
         _INGESTED.pop(0)
 
+    # Feed the Merge Gate learning loop: match this real build result back to a
+    # forecast (by commit SHA / repo) and score the prediction.
+    matched_prediction = None
+    try:
+        from services import prediction_store
+        matched_prediction = prediction_store.record_outcome(
+            repo=body.repo or "", sha=body.commit_sha or "", status=body.status,
+        )
+    except Exception:
+        pass
+
     # Store failed builds in ChromaDB so the AI can find them
     if body.status == "failure" and (body.logs or body.error_summary):
         description = f"{body.source} job '{body.name}' failed on branch {body.branch}"
@@ -94,7 +105,13 @@ async def ingest_pipeline_event(body: PipelineWebhookPayload) -> dict[str, Any]:
             },
         )
 
-    return {"id": pipeline_id, "stored": True, "chroma_indexed": body.status == "failure"}
+    return {
+        "id": pipeline_id,
+        "stored": True,
+        "chroma_indexed": body.status == "failure",
+        "prediction_scored": bool(matched_prediction),
+        "prediction_correct": matched_prediction.get("correct") if matched_prediction else None,
+    }
 
 MOCK_PIPELINES = [
     {

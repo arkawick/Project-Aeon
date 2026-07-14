@@ -2,6 +2,7 @@
 
 | Doc | Contents |
 |---|---|
+| [PAGES.md](PAGES.md) | How every page in the UI works — inputs, flow, API, what you see |
 | [RUNNING.md](RUNNING.md) | How to start, stop, rebuild; known issues; local dev mode |
 | [SERVICES.md](SERVICES.md) | All service URLs, ports, credentials, Docker networking |
 | [DATABASES.md](DATABASES.md) | Inspecting Postgres, Redis, ChromaDB, Neo4j from the terminal |

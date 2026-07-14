@@ -209,6 +209,8 @@ Project-Aeon/
 | Blast Radius | `/blast` | Map what breaks if a PR merges: files → services → AI risk assessment |
 | Merge Gate | `/predict` | Forecast if a PR's build will fail before it runs — memory + hanging points + PR shape + live CI → PASS/CAUTION/BLOCK |
 
+→ **Full per-page walkthrough** (inputs, flow, API, what you see): `docs/PAGES.md`
+
 ---
 
 ## AI Intelligence Features
@@ -226,7 +228,7 @@ Given any GitHub PR, classifies every changed file (Service / Test / Config / Pi
 → Best demo PR: `expressjs/express` #7233 (dependency upgrade touching 4 categories)
 
 ### Predictive Merge Gate (`/predict`)
-Forecasts whether a PR's build will fail **before** it runs — no build, just history + live CI. Fuses four signals: incident-memory resemblance to past failures, **hanging points** (targeted per-file co-change — a file changed without a partner it historically changes with), PR shape (source without tests, big diff, dep/lockfile churn), and high-risk file classes. The PR's **existing CI check-runs** act as a ground-truth prior (a failing check forces a high-confidence BLOCK; all-green dampens the estimate). Output: a fail-risk gauge, PASS/CAUTION/BLOCK verdict, confidence level, the specific hanging points, and a "run these before merge" checklist.
+Forecasts whether a PR's build will fail **before** it runs — no build, just history + live CI. Fuses four signals: incident-memory resemblance to past failures, **hanging points** (targeted per-file co-change — a file changed without a partner it historically changes with), PR shape (source without tests, big diff, dep/lockfile churn), and high-risk file classes. The PR's **existing CI check-runs** act as a ground-truth prior (a failing check forces a high-confidence BLOCK; all-green dampens the estimate). Output: a fail-risk gauge, PASS/CAUTION/BLOCK verdict, confidence level, the specific hanging points, and a "run these before merge" checklist. It **learns**: every forecast is scored against the real build result (matched at `/api/pipelines/ingest`), and the `/predict` page shows a live accuracy scoreboard + calibration. It can also auto-run on a PR-open webhook and post the verdict back as a PR comment + commit status check.
 
 → Full guide: `aeon/MERGE_GATE.md`
 

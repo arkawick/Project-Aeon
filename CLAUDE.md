@@ -29,9 +29,10 @@ Backend and frontend mount source with hot reload — **backend picks up .py edi
 - `aeon/backend/memory/{chroma_store,neo4j_store}.py` — memory layer (both no-op gracefully when down; Neo4j self-heals — see gotcha)
 - `aeon/backend/services/rerank.py` + `graphrag.py` — two-stage retrieval re-rank + GraphRAG graph expansion (feed `search_memory`)
 - `aeon/backend/services/{blast_radius,provenance,cochange}_service.py` — the three graph features (SSE streaming)
-- `aeon/backend/services/predict_service.py` + `api/predict.py` — Predictive Merge Gate (`/predict`): fuses memory + targeted co-change hanging points + PR-shape + live CI check-runs into a PASS/CAUTION/BLOCK forecast (reuses blast's `_gh_get`/`_classify_file`/`_search_incident_memory`)
+- `aeon/backend/services/predict_service.py` + `api/predict.py` — Predictive Merge Gate (`/predict`): fuses memory + targeted co-change hanging points + PR-shape + live CI check-runs into a PASS/CAUTION/BLOCK forecast (reuses blast's `_gh_get`/`_classify_file`/`_search_incident_memory`). **Learning loop:** `services/prediction_store.py` records forecasts; `api/pipelines.py` `/ingest` scores them vs real outcomes (by commit SHA); `/api/predict/stats` is the scoreboard; a calibration factor nudges future probs. **Zero-click:** `POST /api/predict/webhook` (GitHub PR event → auto-forecast + record; posts only if `PREDICT_AUTO_POST=true`), `POST /api/predict/post` (comment + commit status via `github_service.post_pr_comment`/`set_commit_status`).
 - `reseed.ps1` — restore demo memory (6 incidents) after a `down -v`; `setup-new-pc.ps1` + `SETUP_NEW_PC.md` — tested one-shot machine bootstrap
 - Feature docs: `aeon/BLAST_RADIUS.md`, `aeon/CODE_PROVENANCE.md`, `aeon/COCHANGE.md`, `aeon/MERGE_GATE.md`, `SETUP_GUIDE.md`
+- `docs/PAGES.md` — per-page walkthrough of the whole UI (inputs, flow, API, what you see)
 
 ## Architecture rules
 

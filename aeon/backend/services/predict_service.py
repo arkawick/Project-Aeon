@@ -346,8 +346,10 @@ async def predict_build(repo: str, pr_number: int, max_commits: int = 60) -> Asy
     hang_signal = min(1.0, len(hanging) / 3.0)
     risk_signal = min(1.0, sum(risk_counts.values()) / max(len(changed_files), 1))
 
+    from services import prediction_store
+    cal = prediction_store.calibration_factor()   # learned from past predicted-vs-actual
     base = W_MEMORY * mem_signal + W_HANGING * hang_signal + W_SHAPE * shape_signal + W_RISK * risk_signal
-    prob = int(round(base * 100))
+    prob = int(round(min(1.0, base * cal) * 100))
 
     # Ground-truth override
     if ci["state"] == "failed":
@@ -382,6 +384,10 @@ async def predict_build(repo: str, pr_number: int, max_commits: int = 60) -> Asy
         "confidence_score": conf_score,
     }
 
+    # ── Record the forecast for the learning loop ─────────────────────────
+    prediction_store.record_prediction(f"{owner}/{repo_name}", pr_number, head_sha,
+                                       prob, verdict, conf_label)
+
     # ── Narrative ─────────────────────────────────────────────────────────
     yield {"type": "step", "message": "Synthesizing the forecast…"}
     narr = await _narrate(f"{owner}/{repo_name}", pr.get("title", ""), prob, verdict,
@@ -405,6 +411,7 @@ async def predict_build(repo: str, pr_number: int, max_commits: int = 60) -> Asy
             "pr": pr_number,
             "pr_title": pr.get("title", ""),
             "pr_url": pr.get("html_url", ""),
+            "head_sha": head_sha,
             "changed_files": len(changed_files),
             "risk_counts": risk_counts,
             "signals": {"memory": round(mem_signal, 3), "hanging": round(hang_signal, 3),

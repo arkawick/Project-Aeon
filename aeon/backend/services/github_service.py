@@ -130,6 +130,34 @@ class GitHubService:
         except Exception as exc:
             return {"error": str(exc), "created": False}
 
+    async def post_pr_comment(self, owner_repo: str, pr_number: int, body: str) -> dict[str, Any]:
+        """Post a comment on a PR (owner_repo = 'owner/repo'). Needs a write-scoped token."""
+        if not self.token:
+            return {"error": "GITHUB_TOKEN not set (needs write access to comment).", "posted": False}
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/repos/{owner_repo}/issues/{pr_number}/comments"
+                resp = await client.post(url, headers=self.headers, json={"body": body}, timeout=10.0)
+                resp.raise_for_status()
+                return {"posted": True, "url": resp.json().get("html_url", "")}
+        except Exception as exc:
+            return {"error": str(exc), "posted": False}
+
+    async def set_commit_status(self, owner_repo: str, sha: str, state: str,
+                                description: str, context: str = "aeon/merge-gate") -> dict[str, Any]:
+        """Set a commit status check (state: success|failure|pending|error)."""
+        if not self.token or not sha:
+            return {"error": "GITHUB_TOKEN or sha missing.", "posted": False}
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/repos/{owner_repo}/statuses/{sha}"
+                payload = {"state": state, "description": description[:140], "context": context}
+                resp = await client.post(url, headers=self.headers, json=payload, timeout=10.0)
+                resp.raise_for_status()
+                return {"posted": True}
+        except Exception as exc:
+            return {"error": str(exc), "posted": False}
+
     async def create_pr(
         self,
         repo: str,

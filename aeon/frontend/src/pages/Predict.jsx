@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { streamPredict } from '../lib/api.js'
+import { streamPredict, getPredictStats, postPredictToPr } from '../lib/api.js'
 import {
   Gauge, Loader2, AlertCircle, ShieldAlert, AlertTriangle, CheckCircle,
   Brain, GitBranch, Package, ChevronRight, ListChecks, X, FileWarning, Activity,
+  TrendingUp, Send, Target,
 } from 'lucide-react'
 
 const CONF_STYLE = {
@@ -60,6 +61,36 @@ function SignalBar({ label, value, icon: Icon, weight }) {
   )
 }
 
+// Learning-loop scoreboard: how accurate the gate has been vs real build outcomes
+function LearningCard({ stats }) {
+  if (!stats || !stats.resolved) return null
+  const acc = Math.round((stats.accuracy || 0) * 100)
+  return (
+    <div className="bg-aeon-surface border border-aeon-border rounded-xl p-4 mb-5">
+      <div className="flex items-center gap-2 mb-3">
+        <TrendingUp size={14} className="text-green-400" />
+        <span className="text-slate-300 text-xs font-semibold uppercase tracking-wide">Gate learning</span>
+        <span className="text-[10px] text-slate-500">· scored vs real build outcomes</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div><div className="text-2xl font-bold text-white">{acc}%</div><div className="text-[10px] text-slate-500 uppercase">accuracy</div></div>
+        <div><div className="text-2xl font-bold text-white">{stats.resolved}</div><div className="text-[10px] text-slate-500 uppercase">builds scored</div></div>
+        <div><div className="text-2xl font-bold text-white">{stats.brier ?? '—'}</div><div className="text-[10px] text-slate-500 uppercase">brier ↓</div></div>
+        <div><div className="text-2xl font-bold text-white">{stats.calibration_factor ?? '—'}×</div><div className="text-[10px] text-slate-500 uppercase">calibration</div></div>
+      </div>
+      {stats.recent?.length > 0 && (
+        <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-aeon-border flex-wrap">
+          <span className="text-[10px] text-slate-500 mr-1">recent:</span>
+          {stats.recent.map((r, i) => (
+            <span key={i} title={`${r.repo} #${r.pr}: predicted ${r.verdict} ${r.probability}%, actual ${r.actual}`}
+                  className={`w-2.5 h-2.5 rounded-full ${r.correct ? 'bg-green-500' : 'bg-red-500'}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Predict() {
   const [repo, setRepo]   = useState('')
   const [pr, setPr]       = useState('')
@@ -68,7 +99,26 @@ export default function Predict() {
   const [signals, setSignals] = useState(null)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
+  const [stats, setStats] = useState(null)
+  const [posting, setPosting] = useState(false)
+  const [postMsg, setPostMsg] = useState('')
   const esRef = useRef(null)
+
+  const loadStats = useCallback(() => { getPredictStats().then(setStats).catch(() => {}) }, [])
+  useEffect(() => { loadStats() }, [loadStats])
+
+  async function postToPr() {
+    if (!result || !repo || !pr) return
+    if (!window.confirm(`Post the Merge Gate verdict as a comment + status check on ${repo} #${pr}?\n\nThis writes to GitHub and needs a write-scoped token + your access to that repo.`)) return
+    setPosting(true); setPostMsg('')
+    try {
+      const res = await postPredictToPr(repo.trim(), parseInt(pr))
+      const ok = res?.comment?.posted
+      setPostMsg(ok ? `Posted to ${repo} #${pr}` : (res?.comment?.error || res?.error || 'Post failed — check token write access.'))
+    } catch (e) {
+      setPostMsg('Post failed — check backend / token.')
+    } finally { setPosting(false) }
+  }
 
   const abort = useCallback(() => {
     if (esRef.current) { esRef.current.close(); esRef.current = null }
@@ -88,7 +138,7 @@ export default function Predict() {
       try { ev = JSON.parse(e.data) } catch { return }
       if (ev.type === 'step') setSteps(s => [...s, ev.message])
       else if (ev.type === 'signals') setSignals(ev)
-      else if (ev.type === 'result') { setResult(ev); setStatus('done'); abort() }
+      else if (ev.type === 'result') { setResult(ev); setStatus('done'); abort(); loadStats() }
       else if (ev.type === 'error') { setError(ev.message); setStatus('error'); abort() }
     }
     es.onerror = () => {
@@ -134,6 +184,9 @@ export default function Predict() {
           <span className="text-xs text-slate-600">· e.g. express PR 7233</span>
         </div>
       </div>
+
+      {/* Learning scoreboard */}
+      <LearningCard stats={stats} />
 
       {/* Live steps */}
       {status === 'streaming' && (
@@ -183,6 +236,13 @@ export default function Predict() {
                   {result.meta.repo} #{result.meta.pr} · {result.meta.pr_title}
                 </a>
               )}
+              <div className="mt-3 flex items-center gap-2 flex-wrap">
+                <button onClick={postToPr} disabled={posting}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 rounded-lg text-xs transition-colors">
+                  {posting ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Post verdict to PR
+                </button>
+                {postMsg && <span className="text-xs text-slate-400">{postMsg}</span>}
+              </div>
             </div>
           </div>
 

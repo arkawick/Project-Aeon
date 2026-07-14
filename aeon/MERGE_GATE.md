@@ -123,15 +123,44 @@ You get: a circular **fail-risk gauge**, the **verdict + confidence** chip, the 
 
 ---
 
-## API endpoint
+## API endpoints
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/predict/stream?repo=&pr=&commits=` | SSE stream — progress steps, a `signals` event, then the final `result` (verdict, probability, confidence, hanging points, memory matches, CI state, must-test). `commits` (default 60) bounds co-change depth. |
+| `GET /api/predict/stream?repo=&pr=&commits=` | SSE stream — `step` events, a `signals` event, then the final `result` (verdict, probability, confidence, hanging points, memory matches, CI state, must-test). `commits` (default 60) bounds co-change depth. |
+| `GET /api/predict/stats` | Learning scoreboard: accuracy, Brier, BLOCK-precision, calibration factor, recent predicted-vs-actual. |
+| `POST /api/predict/post?repo=&pr=` | Forecast + post verdict to the PR (comment + commit status). Needs a write-scoped token. |
+| `POST /api/predict/webhook` | GitHub pull_request webhook receiver — auto-forecasts + records. Posts only when `PREDICT_AUTO_POST=true`. |
 
-Event types: `step`, `signals`, `result`, `error`.
+SSE event types: `step`, `signals`, `result`, `error`.
 
 ---
+
+## Learning loop — the gate scores itself
+
+The gate doesn't just predict; it **learns whether it was right**.
+
+```
+forecast  ──record──►  prediction_store  ◄──match by commit SHA──  real build result
+   │                        │                                       (/api/pipelines/ingest,
+   │                        ▼                                         Jenkins / GitHub webhook)
+   │                 accuracy · Brier · BLOCK-precision · calibration
+   └──────────────  calibration factor nudges future probabilities  ◄┘
+```
+
+- Every forecast is stored (`services/prediction_store.py`, keyed by `repo#pr` + head SHA).
+- When the **actual** build result later arrives at `/api/pipelines/ingest`, it's matched back by commit SHA (or repo+PR) and the prediction is scored `correct` / not. `/ingest` returns `prediction_scored` + `prediction_correct`.
+- Once ≥ 10 **real** (non-seed) outcomes exist, a **calibration factor** (clamped 0.7–1.3) gently scales future probabilities toward the observed fail rate — so "70%" trends toward meaning a real 70%.
+- `GET /api/predict/stats` returns the scoreboard: accuracy, Brier score, BLOCK-precision, calibration factor, and recent predicted-vs-actual. The `/predict` page shows this as a **"Gate learning"** card (a red/green dot per recent build).
+- The store is seeded with a calibrated set of past outcomes so the scoreboard is meaningful immediately; live results stack on top.
+
+## Zero-click — runs in your workflow
+
+The gate can run automatically and post back to the PR, so it lives where developers work — not only in the Aeon UI.
+
+- **`POST /api/predict/webhook`** — point a GitHub **pull_request** webhook here. On `opened` / `synchronize` / `reopened` it auto-forecasts the PR (which also records it into the learning loop). By default it records only; set `PREDICT_AUTO_POST=true` to also post the verdict.
+- **`POST /api/predict/post?repo=&pr=`** — human-in-the-loop: forecasts and posts the verdict as a **PR comment** *and* a **commit status check** (`aeon/merge-gate`: BLOCK→failure, CAUTION→pending, PASS→success). The `/predict` page exposes this as a **"Post verdict to PR"** button (with a confirm).
+- Requires a **write-scoped `GITHUB_TOKEN`** and that you have write access to the target repo — it will not post to arbitrary public repos.
 
 ## Honest limitations
 
@@ -145,6 +174,17 @@ Event types: `step`, `signals`, `result`, `error`.
 
 | File | Role |
 |---|---|
-| `aeon/backend/services/predict_service.py` | Signal computation + fusion + narrative |
-| `aeon/backend/api/predict.py` | `GET /api/predict/stream` SSE route |
-| `aeon/frontend/src/pages/Predict.jsx` | Gauge + signals + hanging points UI |
+| `aeon/backend/services/predict_service.py` | Signal computation + fusion + calibration + narrative |
+| `aeon/backend/services/prediction_store.py` | Learning loop — records forecasts, scores them vs real outcomes |
+| `aeon/backend/api/predict.py` | `/stream`, `/stats`, `/post`, `/webhook` routes |
+| `aeon/backend/api/pipelines.py` | `/ingest` matches real build results back to predictions |
+| `aeon/backend/services/github_service.py` | `post_pr_comment` + `set_commit_status` |
+| `aeon/frontend/src/pages/Predict.jsx` | Gauge, signals, hanging points, learning card, post button |
+
+## Environment
+
+| Var | Effect |
+|---|---|
+| `GITHUB_TOKEN` (write scope) | Required for `/post` and auto-posting |
+| `PREDICT_AUTO_POST` | `true` → the webhook posts verdicts automatically (default: record only) |
+| `PREDICT_STORE_PATH` | Where the prediction store persists (default `/tmp/aeon_predictions.json`) |

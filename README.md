@@ -95,6 +95,8 @@ Fail-risk gauge + PASS / CAUTION / BLOCK + confidence
 
 ## Features
 
+> **New to the app?** [`docs/PAGES.md`](docs/PAGES.md) walks through how every page works — inputs, under-the-hood flow, the API it calls, and what you see.
+
 | Feature | Description |
 |---|---|
 | **AI Assistant** | Streaming LangGraph agent with live tool call log, confidence scores, memory match cards |
@@ -104,7 +106,7 @@ Fail-risk gauge + PASS / CAUTION / BLOCK + confidence
 | **Knowledge Graph** | Force-directed Neo4j visualization — incident → error type → fix relationships |
 | **Code Provenance** | Trace any file's full history: commits → PRs → issues, per-node AI reasoning, real diffs, timeline layout |
 | **Blast Radius** | Map what breaks when a PR merges: files → services, AI risk level + deploy recommendation |
-| **Predictive Merge Gate** | Forecast if a PR's build will fail *before* it runs — fuses incident memory + co-change hanging points + PR shape + live CI check state into a PASS/CAUTION/BLOCK verdict with confidence |
+| **Predictive Merge Gate** | Forecast if a PR's build will fail *before* it runs — fuses incident memory + co-change hanging points + PR shape + live CI check state into a PASS/CAUTION/BLOCK verdict with confidence. **Learns** from real build outcomes (accuracy scoreboard + calibration) and can auto-run on PR-open and post the verdict back as a PR comment / status check |
 | **Pipelines** | Unified GitHub Actions + Jenkins view, auto-refresh every 30s |
 | **Workflows** | n8n workflow triggers from the dashboard |
 | **Action Engine** | Auto GitHub issue creation; PR proposals with approve/reject UI |
